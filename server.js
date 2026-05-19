@@ -465,9 +465,26 @@ wss.on('connection', (clientWs) => {
         }
         inputTranscriptBuf += event.delta || '';
         broadcastAll({ type: 'conversation.item.input_audio_transcription.delta', delta: event.delta });
-        // Fallback: si el modelo no produce audio de salida, limpia EN VIVO después de 3 s
         if (inputIdleTimer) clearTimeout(inputIdleTimer);
         inputIdleTimer = setTimeout(finishCurrentPhrase, 3000);
+      }
+
+      // Transcripción final del idioma original — reemplaza los deltas provisionales
+      if (event.type === 'session.input_transcript.done') {
+        if (inputIdleTimer) { clearTimeout(inputIdleTimer); inputIdleTimer = null; }
+        const finalText = event.transcript?.trim() || event.text?.trim() || '';
+        if (finalText) {
+          inputTranscriptBuf = finalText;
+          // Reemplazar texto del overlay "EN VIVO" con la versión final corregida
+          broadcastAll({ type: 'source_transcript_final', text: finalText });
+        }
+      }
+
+      // Transcripción final de la traducción — reemplaza deltas y cierra la frase
+      if (event.type === 'session.output_transcript.done') {
+        const finalText = event.transcript?.trim() || event.text?.trim() || '';
+        if (finalText) outputTranscriptBuf = finalText;
+        finishCurrentPhrase();
       }
 
       if (event.type === 'session.closed') {
