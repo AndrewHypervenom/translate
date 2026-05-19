@@ -17,8 +17,6 @@ let serviceEnabled = true;
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate';
 
-const VOICE_MAP = { male: 'echo', female: 'shimmer' };
-
 function broadcastAll(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
@@ -430,10 +428,7 @@ wss.on('connection', (clientWs) => {
               transcription: { model: 'gpt-realtime-whisper' },
               noise_reduction: { type: 'near_field' },
             },
-            output: {
-              language: config.targetLang,
-              voice: VOICE_MAP[config.gender] || 'echo',
-            },
+            output: { language: config.targetLang },
           },
         },
       }));
@@ -507,18 +502,10 @@ wss.on('connection', (clientWs) => {
       case 'set_config':
         if (msg.config) {
           config = { ...config, ...msg.config };
-          if (openaiReady && openaiWs?.readyState === WebSocket.OPEN &&
-              (msg.config.targetLang || msg.config.gender)) {
+          if (openaiReady && openaiWs?.readyState === WebSocket.OPEN && msg.config.targetLang) {
             openaiWs.send(JSON.stringify({
               type: 'session.update',
-              session: {
-                audio: {
-                  output: {
-                    language: config.targetLang,
-                    voice: VOICE_MAP[config.gender] || 'echo',
-                  },
-                },
-              },
+              session: { audio: { output: { language: config.targetLang } } },
             }));
           }
         }
