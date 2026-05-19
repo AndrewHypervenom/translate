@@ -461,6 +461,7 @@ wss.on('connection', (clientWs) => {
 
   function sessionConfig() {
     return {
+      type: 'realtime',
       modalities: ['text', 'audio'],
       input_audio_format: 'pcm16',
       output_audio_format: 'pcm16',
