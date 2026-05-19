@@ -1,0 +1,20 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno
+.env
+
+# Extensión de Chrome (se publica aparte en la Chrome Web Store)
+extension/
+
+# Claude Code
+.claude/
+
+# Archivos locales innecesarios
+*.zip
+*.log
+*.jpg
+*.png
+positivo1024.jpg
+image.png
+logo.jpg
