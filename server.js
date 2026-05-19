@@ -15,68 +15,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // ── Kill switch global ────────────────────────────────────────────────────────
 let serviceEnabled = true;
 
-const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
-
-const LANG_NAMES = {
-  es: 'Spanish', en: 'English', fr: 'French', de: 'German',
-  ja: 'Japanese', zh: 'Chinese (Simplified)', pt: 'Portuguese (Brazilian)',
-  it: 'Italian', ar: 'Arabic', ko: 'Korean', ru: 'Russian',
-  hi: 'Hindi', nl: 'Dutch', tr: 'Turkish', pl: 'Polish',
-};
-
-const VOICE_MAP = { male: 'echo', female: 'shimmer' };
-
-// Instrucciones para el intérprete simultáneo
-function buildInstructions(sourceLang, targetLang) {
-  const src = LANG_NAMES[sourceLang] || sourceLang;
-  const tgt = LANG_NAMES[targetLang] || targetLang;
-  return (
-    `You are a silent real-time speech translator. ` +
-    `Your ONLY job: when you hear ${src}, output the ${tgt} translation and nothing else. ` +
-    `ABSOLUTE RULES — breaking any of these is a critical failure: ` +
-    `(1) NEVER say "I couldn't hear you", "Could you repeat", "I'm sorry", or ANY phrase that is not a direct translation. ` +
-    `(2) If the audio is silent, unclear, or contains only noise — output NOTHING. Complete silence. Zero words. ` +
-    `(3) NEVER ask for clarification or repetition. ` +
-    `(4) NEVER greet, introduce yourself, or acknowledge the user. ` +
-    `(5) Output ONLY the translated words. No punctuation changes, no added commentary. ` +
-    `You are not a conversational assistant. You are a translation machine. Silence is always better than a wrong response.`
-  );
-}
-
-// Alucinaciones conocidas de Whisper — se usan para suprimir respuestas vacías
-const HALLUCINATION_EXACT = new Set([
-  'chao', 'chau', 'bye', 'goodbye', 'ok', 'okay',
-  'gracias', 'thanks', 'thank you', 'merci', 'obrigado', 'obrigada',
-  'suscríbete', 'subscribe', 'subtitles by', 'subtitles created',
-  'um', 'uh', 'hmm', 'eh', 'you', 'the', 'a', 'i',
-]);
-
-const HALLUCINATION_CONTAINS = [
-  'amara.org', 'subtitles created by', 'like and subscribe',
-  'transcribed by', 'closed captions', 'www.', '.com', '.org',
-];
-
-function isHallucination(transcript) {
-  const clean = transcript.trim().toLowerCase().replace(/[.,!?¿¡'"]/g, '').trim();
-  if (clean.length <= 2) return true;
-  if (HALLUCINATION_EXACT.has(clean)) return true;
-  if (HALLUCINATION_CONTAINS.some(s => clean.includes(s))) return true;
-  return false;
-}
-
-// Frases que el modelo genera cuando no escucha nada — nunca deben salir al usuario
-const FILLER_PHRASES = [
-  "i couldn't hear", "could you say that", "could you repeat",
-  "i didn't catch", "i'm sorry", "pardon", "come again",
-  "please repeat", "can you speak", "speak up",
-  "no pude escuchar", "podría repetir", "no te escuché",
-  "lo siento", "no entendí",
-];
-
-function isFiller(text) {
-  const low = text.toLowerCase();
-  return FILLER_PHRASES.some(f => low.includes(f));
-}
+const REALTIME_URL = 'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate';
 
 function broadcastAll(data) {
   const msg = JSON.stringify(data);
@@ -428,26 +367,15 @@ wss.on('connection', (clientWs) => {
   let openaiReady = false;
   let audioQueue = [];
 
-  let pendingOriginal = '';
+  // Phrase boundary tracking — 600 ms sin audio = frase terminada
   let currentItemId = null;
-  let partialTranslationBuf = '';
-  let fillerCancelled = false;
-  let manualResponsePending = false;
+  let phraseCount = 0;
+  let audioGapTimer = null;
+  let outputTranscriptBuf = '';
+  let inputTranscriptBuf = '';
+  let phraseStarted = false;
 
-  let responseActive = false;
-  const transcriptQueue = [];
-
-  function processNextTranscript() {
-    if (responseActive || transcriptQueue.length === 0) return;
-    const next = transcriptQueue.shift();
-    pendingOriginal = next.original;
-    createTranslationResponse();
-  }
-
-  function releaseResponse() {
-    responseActive = false;
-    processNextTranscript();
-  }
+  function newPhraseId() { return `tr-${++phraseCount}`; }
 
   function send(data) {
     if (clientWs.readyState === WebSocket.OPEN) clientWs.send(JSON.stringify(data));
@@ -455,194 +383,93 @@ wss.on('connection', (clientWs) => {
 
   function flushQueue() {
     while (audioQueue.length > 0 && openaiWs?.readyState === WebSocket.OPEN) {
-      openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: audioQueue.shift() }));
+      openaiWs.send(JSON.stringify({ type: 'session.input_audio_buffer.append', audio: audioQueue.shift() }));
     }
   }
 
-  function sessionConfig() {
-    return {
-      type: 'realtime',
-      modalities: ['text', 'audio'],
-      input_audio_format: 'pcm16',
-      output_audio_format: 'pcm16',
-      voice: VOICE_MAP[config.gender] || 'echo',
-      input_audio_transcription: { model: 'whisper-1', language: config.sourceLang },
-      turn_detection: {
-        type: 'server_vad',
-        threshold: 0.5,
-        prefix_padding_ms: 150,
-        silence_duration_ms: 300,
-      },
-    };
-  }
-
-  function createTranslationResponse() {
-    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
-    responseActive = true;
-    manualResponsePending = true;
-    openaiWs.send(JSON.stringify({
-      type: 'response.create',
-      response: {
-        modalities: ['text', 'audio'],
-        output_audio_format: 'pcm16',
-        voice: VOICE_MAP[config.gender] || 'echo',
-        instructions: buildInstructions(config.sourceLang, config.targetLang),
-        max_output_tokens: 512,
-      },
-    }));
-    partialTranslationBuf = '';
-    fillerCancelled = false;
+  function finishCurrentPhrase() {
+    if (audioGapTimer) { clearTimeout(audioGapTimer); audioGapTimer = null; }
+    if (!currentItemId) return;
+    const id = currentItemId;
+    const translation = outputTranscriptBuf.trim();
+    const original = inputTranscriptBuf.trim();
     currentItemId = null;
+    outputTranscriptBuf = '';
+    inputTranscriptBuf = '';
+    phraseStarted = false;
+    send({ type: 'tts_done', item_id: id });
+    if (translation) {
+      send({ type: 'translation', item_id: id, original, translation });
+      console.log(`[→] ${original || '(sin transcripción)'}`);
+      console.log(`[←] ${translation}\n`);
+    }
+    broadcastAll({ type: 'conversation.item.input_audio_transcription.completed', transcript: original });
   }
 
   function connectToOpenAI() {
     openaiReady = false;
     audioQueue = [];
-    pendingOriginal = '';
+    currentItemId = null;
+    outputTranscriptBuf = '';
+    inputTranscriptBuf = '';
+    phraseStarted = false;
 
     openaiWs = new WebSocket(REALTIME_URL, {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     });
 
     openaiWs.on('open', () => {
-      console.log('[OpenAI] Conectado — configurando sesión de intérprete');
-      openaiWs.send(JSON.stringify({ type: 'session.update', session: sessionConfig() }));
+      console.log('[OpenAI] Conectado — configurando sesión gpt-realtime-translate');
+      openaiWs.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          audio: {
+            input: {
+              transcription: { model: 'gpt-realtime-whisper' },
+              noise_reduction: { type: 'near_field' },
+            },
+            output: { language: config.targetLang },
+          },
+        },
+      }));
+      openaiReady = true;
+      flushQueue();
+      send({ type: 'ready' });
     });
 
     openaiWs.on('message', (raw) => {
       const event = JSON.parse(raw.toString());
 
-      // ── Sesión lista ─────────────────────────────────────────────────────────
-      if (event.type === 'session.updated') {
-        openaiReady = true;
-        flushQueue();
-        send({ type: 'ready' });
-        return;
+      if (event.type === 'session.output_audio.delta') {
+        if (!currentItemId) currentItemId = newPhraseId();
+        if (audioGapTimer) clearTimeout(audioGapTimer);
+        audioGapTimer = setTimeout(finishCurrentPhrase, 600);
+        send({ type: 'tts_chunk', item_id: currentItemId, audio: event.delta });
       }
 
-      // ── Respuesta creada ──────────────────────────────────────────────────────
-      if (event.type === 'response.created') {
-        if (manualResponsePending) {
-          // Es la nuestra — marcar como consumida
-          manualResponsePending = false;
-          console.log(`[response.created] Nuestra respuesta: ${event.response?.id}`);
-        } else if (openaiWs?.readyState === WebSocket.OPEN) {
-          // Auto-creada por VAD — cancelar inmediatamente
-          console.log(`[response.created] VAD auto-response cancelada: ${event.response?.id}`);
-          openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
+      if (event.type === 'session.output_transcript.delta') {
+        if (!currentItemId) currentItemId = newPhraseId();
+        outputTranscriptBuf += event.delta || '';
+        send({ type: 'translation_partial', item_id: currentItemId, delta: event.delta });
+      }
+
+      if (event.type === 'session.input_transcript.delta') {
+        if (!phraseStarted) {
+          phraseStarted = true;
+          broadcastAll({ type: 'input_audio_buffer.committed' });
         }
-        return;
+        inputTranscriptBuf += event.delta || '';
+        broadcastAll({ type: 'conversation.item.input_audio_transcription.delta', delta: event.delta });
       }
 
-      // ── Transcripción del audio de entrada (lo que dijeron en el idioma original) ──
-      if (event.type === 'input_audio_buffer.committed') {
-        broadcastAll(event);
+      if (event.type === 'session.closed') {
+        finishCurrentPhrase();
+        const ws = openaiWs;
+        openaiWs = null;
+        openaiReady = false;
+        ws?.close();
       }
 
-      if (event.type === 'conversation.item.input_audio_transcription.delta') {
-        broadcastAll(event);
-      }
-
-      if (event.type === 'conversation.item.input_audio_transcription.completed') {
-        broadcastAll(event);
-        const t = event.transcript?.trim();
-        if (t && !isHallucination(t)) {
-          if (responseActive) {
-            // Ya hay una respuesta en curso — encolar para traducir después
-            transcriptQueue.push({ original: t });
-            console.log(`[COLA +1] "${t}" (cola: ${transcriptQueue.length})`);
-          } else {
-            pendingOriginal = t;
-            createTranslationResponse();
-          }
-        } else {
-          if (t) console.log(`[HALLUC ignorado] "${t}"`);
-        }
-      }
-
-      // ── Audio de la traducción en streaming (sale mientras el modelo habla) ──
-      if (event.type === 'response.audio.delta') {
-        if (!fillerCancelled) {
-          currentItemId = event.item_id;
-          send({ type: 'tts_chunk', item_id: event.item_id, audio: event.delta });
-        }
-      }
-
-      if (event.type === 'response.audio.done') {
-        if (!fillerCancelled) {
-          send({ type: 'tts_done', item_id: event.item_id });
-        }
-      }
-
-      // ── Texto de la traducción en streaming ──────────────────────────────────
-      if (event.type === 'response.audio_transcript.delta') {
-        if (fillerCancelled) return;
-
-        partialTranslationBuf += event.delta || '';
-
-        // Cancelar tan pronto como el acumulador deje claro que es una frase de relleno
-        if (partialTranslationBuf.length >= 8 && isFiller(partialTranslationBuf)) {
-          fillerCancelled = true;
-          console.warn(`[FILLER cancelado] "${partialTranslationBuf.trim()}"`);
-          if (openaiWs?.readyState === WebSocket.OPEN) {
-            openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-          }
-          // Decirle al cliente que descarte el audio ya enviado de este item
-          if (currentItemId) {
-            send({ type: 'tts_cancel', item_id: currentItemId });
-          }
-          return;
-        }
-
-        send({ type: 'translation_partial', item_id: event.item_id, delta: event.delta });
-      }
-
-      if (event.type === 'response.audio_transcript.done') {
-        const translation = event.transcript?.trim();
-        if (translation && !isFiller(translation)) {
-          send({
-            type: 'translation',
-            item_id: event.item_id,
-            original: pendingOriginal,
-            translation,
-          });
-          console.log(`[→] ${pendingOriginal || '(sin transcripción)'}`);
-          console.log(`[←] ${translation}\n`);
-        } else if (translation) {
-          console.warn(`[FILLER suprimido] ${translation}`);
-        }
-        pendingOriginal = '';
-        // Este evento solo llega para respuestas que generaron output real (las nuestras).
-        // VAD responses canceladas no generan transcript — este es el reset principal.
-        releaseResponse();
-      }
-
-      // ── Fin de respuesta (fallback) ──────────────────────────────────────────
-      // audio_transcript.done es el reset normal para respuestas completadas.
-      // response.done cubre los casos donde ese evento no llega:
-      //   - status=failed: respuesta falló antes de generar output
-      //   - status=cancelled + fillerCancelled: nosotros la cancelamos por filler
-      // status=cancelled + !fillerCancelled = VAD auto-response que cancelamos,
-      // no somos dueños del lock — no liberar.
-      if (event.type === 'response.done') {
-        const status = event.response?.status;
-        console.log(`[response.done] status=${status} fillerCancelled=${fillerCancelled} responseActive=${responseActive}`);
-        if (responseActive) {
-          if (status === 'failed') {
-            const err = event.response?.last_error;
-            const errMsg = err?.message || err?.code || 'sin detalle';
-            console.warn(`[response.done] Respuesta falló (${errMsg}) — liberando responseActive`);
-            if (err) console.warn('[response.done] last_error completo:', JSON.stringify(err));
-            releaseResponse();
-          } else if (status === 'cancelled' && fillerCancelled) {
-            releaseResponse();
-          }
-        }
-      }
-
-      // ── Errores ──────────────────────────────────────────────────────────────
       if (event.type === 'error') {
         const msg = event.error?.message || JSON.stringify(event.error) || 'OpenAI error';
         console.error('[OpenAI] Error:', msg);
@@ -651,13 +478,13 @@ wss.on('connection', (clientWs) => {
     });
 
     openaiWs.on('error', (err) => {
-      const message = err?.message || String(err) || 'OpenAI WebSocket error';
-      console.error('[OpenAI] WS error:', message);
-      send({ type: 'error', message });
+      console.error('[OpenAI] WS error:', err?.message || String(err));
+      send({ type: 'error', message: err?.message || 'OpenAI WebSocket error' });
     });
 
     openaiWs.on('close', (code, reason) => {
       openaiReady = false;
+      finishCurrentPhrase();
       const reasonStr = reason?.length ? reason.toString() : '';
       console.log(`[OpenAI] WS cerrado: code=${code}${reasonStr ? ' — ' + reasonStr : ''}`);
       if (code !== 1000 && code !== 1001) {
@@ -675,13 +502,11 @@ wss.on('connection', (clientWs) => {
       case 'set_config':
         if (msg.config) {
           config = { ...config, ...msg.config };
-          if (openaiReady && openaiWs?.readyState === WebSocket.OPEN) {
-            const patch = {};
-            if (msg.config.sourceLang) patch.input_audio_transcription = { model: 'whisper-1', language: config.sourceLang };
-            if (msg.config.gender) patch.voice = VOICE_MAP[config.gender] || 'echo';
-            if (Object.keys(patch).length > 0) {
-              openaiWs.send(JSON.stringify({ type: 'session.update', session: patch }));
-            }
+          if (openaiReady && openaiWs?.readyState === WebSocket.OPEN && msg.config.targetLang) {
+            openaiWs.send(JSON.stringify({
+              type: 'session.update',
+              session: { audio: { output: { language: config.targetLang } } },
+            }));
           }
         }
         break;
@@ -691,23 +516,21 @@ wss.on('connection', (clientWs) => {
         break;
 
       case 'stop':
-        openaiWs?.close();
-        openaiWs = null;
         openaiReady = false;
         audioQueue = [];
-        pendingOriginal = '';
-        partialTranslationBuf = '';
-        fillerCancelled = false;
-        currentItemId = null;
-        manualResponsePending = false;
-        responseActive = false;
-        transcriptQueue.length = 0;
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({ type: 'session.close' }));
+        } else {
+          openaiWs?.close();
+          openaiWs = null;
+          finishCurrentPhrase();
+        }
         break;
 
       case 'audio_chunk':
         if (!msg.audio) break;
         if (openaiReady && openaiWs?.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: msg.audio }));
+          openaiWs.send(JSON.stringify({ type: 'session.input_audio_buffer.append', audio: msg.audio }));
         } else if (audioQueue.length < 12) {
           audioQueue.push(msg.audio);
         }
@@ -715,7 +538,12 @@ wss.on('connection', (clientWs) => {
     }
   });
 
-  clientWs.on('close', () => openaiWs?.close());
+  clientWs.on('close', () => {
+    if (openaiWs?.readyState === WebSocket.OPEN) {
+      openaiWs.send(JSON.stringify({ type: 'session.close' }));
+    }
+    openaiWs?.close();
+  });
 });
 
 const PORT = process.env.PORT || 3000;
