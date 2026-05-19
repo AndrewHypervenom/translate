@@ -362,15 +362,15 @@ wss.on('connection', (clientWs) => {
     return;
   }
 
-  let config = { sourceLang: 'pt', targetLang: 'es', gender: 'male' };
+  let config = { sourceLang: 'pt', targetLang: 'es' };
   let openaiWs = null;
   let openaiReady = false;
   let audioQueue = [];
 
-  // Phrase boundary tracking — 600 ms sin audio = frase terminada
   let currentItemId = null;
   let phraseCount = 0;
   let audioGapTimer = null;
+  let inputIdleTimer = null;
   let outputTranscriptBuf = '';
   let inputTranscriptBuf = '';
   let phraseStarted = false;
@@ -389,7 +389,8 @@ wss.on('connection', (clientWs) => {
 
   function finishCurrentPhrase() {
     if (audioGapTimer) { clearTimeout(audioGapTimer); audioGapTimer = null; }
-    if (!currentItemId) return;
+    if (inputIdleTimer) { clearTimeout(inputIdleTimer); inputIdleTimer = null; }
+
     const id = currentItemId;
     const translation = outputTranscriptBuf.trim();
     const original = inputTranscriptBuf.trim();
@@ -397,13 +398,18 @@ wss.on('connection', (clientWs) => {
     outputTranscriptBuf = '';
     inputTranscriptBuf = '';
     phraseStarted = false;
-    send({ type: 'tts_done', item_id: id });
-    if (translation) {
-      send({ type: 'translation', item_id: id, original, translation });
-      console.log(`[→] ${original || '(sin transcripción)'}`);
-      console.log(`[←] ${translation}\n`);
-    }
+
+    // Siempre ocultar "EN VIVO" aunque no haya llegado audio de salida
     broadcastAll({ type: 'conversation.item.input_audio_transcription.completed', transcript: original });
+
+    if (id) {
+      send({ type: 'tts_done', item_id: id });
+      if (translation) {
+        send({ type: 'translation', item_id: id, original, translation });
+        console.log(`[→] ${original || '(sin transcripción)'}`);
+        console.log(`[←] ${translation}\n`);
+      }
+    }
   }
 
   function connectToOpenAI() {
@@ -426,7 +432,6 @@ wss.on('connection', (clientWs) => {
           audio: {
             input: {
               transcription: { model: 'gpt-realtime-whisper' },
-              noise_reduction: { type: 'near_field' },
             },
             output: { language: config.targetLang },
           },
@@ -460,6 +465,9 @@ wss.on('connection', (clientWs) => {
         }
         inputTranscriptBuf += event.delta || '';
         broadcastAll({ type: 'conversation.item.input_audio_transcription.delta', delta: event.delta });
+        // Fallback: si el modelo no produce audio de salida, limpia EN VIVO después de 3 s
+        if (inputIdleTimer) clearTimeout(inputIdleTimer);
+        inputIdleTimer = setTimeout(finishCurrentPhrase, 3000);
       }
 
       if (event.type === 'session.closed') {
