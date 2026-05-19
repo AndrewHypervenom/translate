@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // ── Kill switch global ────────────────────────────────────────────────────────
 let serviceEnabled = true;
 
-const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview';
+const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
 
 const LANG_NAMES = {
   es: 'Spanish', en: 'English', fr: 'French', de: 'German',
