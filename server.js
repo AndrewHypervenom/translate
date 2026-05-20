@@ -49,6 +49,10 @@ function requireAdminToken(req, res, next) {
   next();
 }
 
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+
 app.get('/api/status', (_req, res) => {
   res.json({ enabled: serviceEnabled, clients: wss.clients.size });
 });

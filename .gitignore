@@ -10,6 +10,9 @@ extension/
 # Claude Code
 .claude/
 
+# Carpetas temporales
+_ext_tmp/
+
 # Archivos locales innecesarios
 *.zip
 *.log
