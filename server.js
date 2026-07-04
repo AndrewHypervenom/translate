@@ -373,45 +373,18 @@ const ELEVEN_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';       
 //   'elevenlabs' → voz fija de ElevenLabs (pierde la voz del hablante).
 const TRANSLATE_VOICE = (process.env.TRANSLATE_VOICE || 'native').toLowerCase();
 const USE_ELEVEN   = !!ELEVEN_KEY && TRANSLATE_VOICE === 'elevenlabs';
-// ── Motor de traducción ───────────────────────────────────────────────────────
-//   'interpreter' → gpt-realtime como intérprete simultáneo: un solo modelo hace
-//                   traducción (calidad LLM) + voz natural elegible. Menos latencia.
-//   'translate'   → gpt-realtime-translate (texto) + ElevenLabs/OpenAI para la voz.
-const ENGINE = (process.env.ENGINE || 'interpreter').toLowerCase();
-const REALTIME_GA_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
-const REALTIME_VOICE = process.env.REALTIME_VOICE || 'marin'; // marin, cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse
 
-const LANG_NAMES = {
-  es: 'Spanish', en: 'English', pt: 'Portuguese', fr: 'French', de: 'German',
-  it: 'Italian', zh: 'Chinese (Mandarin)', ja: 'Japanese', ko: 'Korean',
-  ru: 'Russian', ar: 'Arabic', hi: 'Hindi', id: 'Indonesian',
-};
-
-function interpreterInstructions(sourceLang, targetLang) {
-  const target = LANG_NAMES[targetLang] || targetLang;
-  const source = LANG_NAMES[sourceLang];
-  const from = source ? `from ${source}` : `from whatever language you hear`;
-  return [
-    `You are a simultaneous interpreter, NOT an assistant and NOT a chatbot. Your ONLY job is to translate the speaker's words ${from} into ${target}.`,
-    `CRITICAL RULE: You must NEVER respond to, answer, react to, or engage with what is said — you only translate it into ${target}.`,
-    `Example: if the speaker asks "how are you?", you output the ${target} translation of "how are you?" — you must NOT answer "I'm fine". If they ask "does it sound okay?", you output the ${target} translation of that question, never an answer.`,
-    `Preserve meaning, tone and intent; keep questions as questions, keep exclamations and emphasis. Output ONLY the ${target} translation and nothing else.`,
-    `Translate only what was clearly and actually said; never invent, guess, complete or add words. On silence or noise, stay silent. If the speech is already in ${target}, restate it cleanly.`,
-  ].join(' ');
-}
-
-if (ENGINE === 'interpreter') {
-  console.log(`[Motor] intérprete → gpt-realtime (voz fija ${REALTIME_VOICE})`);
-} else {
-  console.log('[Motor] translate → gpt-realtime-translate (simultáneo)');
-  console.log(USE_ELEVEN
-    ? `[Voz] ElevenLabs (voz fija ${ELEVEN_VOICE}, modelo ${ELEVEN_MODEL})`
-    : '[Voz] nativa del modelo — CONSERVA el tono/voz del hablante');
-}
+// Motor único: gpt-realtime-translate (API de traducción dedicada). Solo traduce
+// por diseño — no puede responder, conversar ni inventar contenido. Aquí NO se
+// usa gpt-realtime (el modelo conversacional).
+console.log('[Motor] gpt-realtime-translate (traducción simultánea)');
+console.log(USE_ELEVEN
+  ? `[Voz] ElevenLabs (voz fija ${ELEVEN_VOICE}, modelo ${ELEVEN_MODEL})`
+  : '[Voz] nativa del modelo — CONSERVA el tono/voz del hablante');
 
 const room = {
   broadcaster: null,          // WS del emisor activo (uno a la vez)
-  sessions: new Map(),        // targetLang -> sesión (Interpreter/Lang)
+  sessions: new Map(),        // targetLang -> LangSession
   listeners: new Set(),       // WS de todos los oyentes
   sourceLang: 'es',           // idioma que habla el emisor (lo fija en la página)
 
@@ -447,7 +420,7 @@ const room = {
   ensureSession(lang) {
     let s = this.sessions.get(lang);
     if (!s) {
-      s = ENGINE === 'interpreter' ? new InterpreterSession(lang) : new LangSession(lang);
+      s = new LangSession(lang);
       this.sessions.set(lang, s);
       s.connect();
     }
@@ -683,141 +656,6 @@ class LangSession {
     if (this.openaiWs?.readyState === WebSocket.OPEN) {
       this.openaiWs.send(JSON.stringify({ type: 'session.close' }));
     }
-    this.openaiWs?.close();
-    this.openaiWs = null;
-  }
-}
-
-// Sesión de intérprete con gpt-realtime (GA): traduce + voz natural en un modelo.
-// El propio modelo detecta el fin de turno (semantic_vad) y responde solo.
-class InterpreterSession {
-  constructor(targetLang) {
-    this.targetLang = targetLang;
-    this.listeners = new Set();
-    this.openaiWs = null;
-    this.ready = false;
-    this.audioQueue = [];
-    this.outputBuf = '';
-    this.inputBuf = '';
-  }
-
-  isPrimary() { return room.primarySession() === this; }
-
-  toListeners(data) {
-    for (const ws of this.listeners) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
-    }
-  }
-
-  connect() {
-    this.ready = false;
-    const sock = new WebSocket(REALTIME_GA_URL, {
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-    });
-    this.openaiWs = sock;
-
-    sock.on('open', () => {
-      if (sock !== this.openaiWs) { sock.close(); return; }
-      console.log(`[Intérprete] Sesión lista → ${this.targetLang} (voz ${REALTIME_VOICE})`);
-      sock.send(JSON.stringify({
-        type: 'session.update',
-        session: {
-          type: 'realtime',
-          output_modalities: ['audio'],
-          instructions: interpreterInstructions(room.sourceLang, this.targetLang),
-          audio: {
-            input: {
-              format: { type: 'audio/pcm', rate: 24000 },
-              // server_vad para frases largas de reunión:
-              //  - interrupt_response:false → seguir hablando NO cancela la traducción
-              //    en curso (antes se cortaba a mitad de frases largas).
-              //  - silence_duration 1500 → no cierra el turno en pausas cortas dentro
-              //    de una misma oración. Subir si aún corta; bajar para más agilidad.
-              //  - threshold 0.6 → el ruido de fondo no dispara (evita alucinaciones).
-              turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 300, silence_duration_ms: 1500, create_response: true, interrupt_response: false },
-              // Pista fija del idioma del emisor → evita que confunda p. ej. español con portugués.
-              transcription: { model: 'whisper-1', language: room.sourceLang },
-              noise_reduction: { type: 'near_field' },
-            },
-            output: { format: { type: 'audio/pcm', rate: 24000 }, voice: REALTIME_VOICE },
-          },
-        },
-      }));
-      this.ready = true;
-      while (this.audioQueue.length && sock.readyState === WebSocket.OPEN) {
-        sock.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: this.audioQueue.shift() }));
-      }
-      this.toListeners({ type: 'ready', lang: this.targetLang });
-    });
-
-    sock.on('message', (raw) => {
-      if (sock !== this.openaiWs) return;
-      let e; try { e = JSON.parse(raw.toString()); } catch { return; }
-
-      // Voz traducida (PCM16 24 kHz) → streaming directo a los oyentes.
-      if (e.type === 'response.output_audio.delta') {
-        this.toListeners({ type: 'audio', chunk: e.delta });
-      }
-      // Subtítulos de la traducción.
-      if (e.type === 'response.output_audio_transcript.delta') {
-        this.outputBuf += e.delta || '';
-        this.toListeners({ type: 'partial', text: this.outputBuf });
-      }
-      if (e.type === 'response.output_audio_transcript.done') {
-        const t = (e.transcript || this.outputBuf || '').trim();
-        this.outputBuf = '';
-        if (t) this.toListeners({ type: 'final', text: t });
-      }
-      // Transcripción del idioma origen → confirmación en pantalla del emisor.
-      if (e.type === 'conversation.item.input_audio_transcription.delta' && this.isPrimary()) {
-        this.inputBuf += e.delta || '';
-        room.sendToBroadcaster({ type: 'source_partial', text: this.inputBuf });
-      }
-      if (e.type === 'conversation.item.input_audio_transcription.completed' && this.isPrimary()) {
-        const t = (e.transcript || '').trim();
-        this.inputBuf = '';
-        if (t) room.sendToBroadcaster({ type: 'source_final', text: t });
-      }
-
-      if (e.type === 'error') {
-        const msg = e.error?.message || 'OpenAI error';
-        console.error(`[Intérprete:${this.targetLang}] Error:`, msg);
-        this.toListeners({ type: 'error', message: msg });
-      }
-    });
-
-    sock.on('error', (err) => console.error(`[Intérprete:${this.targetLang}] WS error:`, err?.message || String(err)));
-    sock.on('close', (code) => {
-      if (sock !== this.openaiWs) return;
-      this.openaiWs = null; this.ready = false;
-      if (code !== 1000 && code !== 1001 && this.listeners.size > 0) {
-        setTimeout(() => { if (this.listeners.size > 0) this.connect(); }, 1000);
-      }
-    });
-  }
-
-  appendAudio(base64) {
-    if (this.ready && this.openaiWs?.readyState === WebSocket.OPEN) {
-      this.openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: base64 }));
-    } else if (this.audioQueue.length < MAX_QUEUED_CHUNKS) {
-      this.audioQueue.push(base64);
-    }
-  }
-
-  // Cambiar el idioma del emisor en caliente (instrucciones + pista de transcripción).
-  updateSourceLang() {
-    if (this.openaiWs?.readyState === WebSocket.OPEN) {
-      this.openaiWs.send(JSON.stringify({
-        type: 'session.update',
-        session: {
-          instructions: interpreterInstructions(room.sourceLang, this.targetLang),
-          audio: { input: { transcription: { model: 'whisper-1', language: room.sourceLang } } },
-        },
-      }));
-    }
-  }
-
-  close() {
     this.openaiWs?.close();
     this.openaiWs = null;
   }
