@@ -66,7 +66,7 @@ app.get('/privacy', (_req, res) => {
   </ul>
 
   <h2>Servicios de terceros</h2>
-  <p>El audio es procesado por <a href="https://openai.com/policies/privacy-policy" target="_blank">OpenAI</a> exclusivamente para la traducción. La voz traducida puede generarse con <a href="https://elevenlabs.io/privacy-policy" target="_blank">ElevenLabs</a> a partir del texto ya traducido. Consulta sus políticas de privacidad para más detalles.</p>
+  <p>El audio es procesado por <a href="https://openai.com/policies/privacy-policy" target="_blank">OpenAI</a> exclusivamente para la traducción. Consulta su política de privacidad para más detalles.</p>
 
   <h2>Permisos de Chrome</h2>
   <ul>
@@ -357,30 +357,11 @@ const MAX_QUEUED_CHUNKS = 120; // ~10 s de audio retenido mientras conecta OpenA
 // el subtítulo incompleto.
 const PHRASE_SAFETY_MS = 5000;
 
-// ── ElevenLabs: voz de alta calidad para el audio traducido ───────────────────
-// Si hay ELEVENLABS_API_KEY, sintetizamos la voz con ElevenLabs a partir del
-// texto ya traducido por OpenAI (mucho más natural y expresiva). Si no hay key,
-// caemos automáticamente al audio del propio modelo de OpenAI: la demo nunca se
-// rompe, solo cambia la calidad de la voz.
-// Usamos MP3 (funciona en cualquier plan de ElevenLabs, incluido el gratis) y lo
-// decodifica el navegador del oyente.
-const ELEVEN_KEY   = process.env.ELEVENLABS_API_KEY || '';
-const ELEVEN_VOICE = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // Rachel (multilingüe)
-const ELEVEN_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';       // rápido y multilingüe
-// Fuente de voz en modo translate:
-//   'native'     → voz del propio gpt-realtime-translate, que CONSERVA el tono/voz
-//                  del hablante (lo que muestra el anuncio de OpenAI). Recomendado.
-//   'elevenlabs' → voz fija de ElevenLabs (pierde la voz del hablante).
-const TRANSLATE_VOICE = (process.env.TRANSLATE_VOICE || 'native').toLowerCase();
-const USE_ELEVEN   = !!ELEVEN_KEY && TRANSLATE_VOICE === 'elevenlabs';
-
 // Motor único: gpt-realtime-translate (API de traducción dedicada). Solo traduce
 // por diseño — no puede responder, conversar ni inventar contenido. Aquí NO se
 // usa gpt-realtime (el modelo conversacional).
 console.log('[Motor] gpt-realtime-translate (traducción simultánea)');
-console.log(USE_ELEVEN
-  ? `[Voz] ElevenLabs (voz fija ${ELEVEN_VOICE}, modelo ${ELEVEN_MODEL})`
-  : '[Voz] nativa del modelo — CONSERVA el tono/voz del hablante');
+console.log('[Voz] nativa del modelo — CONSERVA el tono/voz del hablante');
 
 const room = {
   broadcaster: null,          // WS del emisor activo (uno a la vez)
@@ -453,9 +434,6 @@ class LangSession {
     this.outputBuf = '';
     this.inputBuf = '';
     this.gapTimer = null;
-    this.ttsQueue = [];      // segmentos de texto pendientes de sintetizar (ElevenLabs)
-    this.ttsBusy = false;
-    this.ttsPending = '';    // texto traducido aún no enviado a TTS (se corta por oraciones)
   }
 
   isPrimary() { return room.primarySession() === this; }
@@ -470,83 +448,9 @@ class LangSession {
     if (this.gapTimer) { clearTimeout(this.gapTimer); this.gapTimer = null; }
     const translation = this.outputBuf.trim();
     if (translation) this.toListeners({ type: 'final', text: translation });
-    // Sintetizar lo que quede pendiente (última oración sin punto final).
-    this.pumpTTS(true);
     this.currentItemId = null;
     this.outputBuf = '';
     this.inputBuf = '';
-  }
-
-  // ── Voz con ElevenLabs (cola serializada para no solapar segmentos) ─────────
-  // Para bajar la latencia sintetizamos por ORACIONES a medida que llegan, en
-  // lugar de esperar a que termine toda la frase.
-  pumpTTS(force) {
-    if (!USE_ELEVEN) return;
-    // Sacar oraciones completas (terminadas en . ! ? … seguidas de espacio).
-    const re = /^([\s\S]*?[.!?…]+["'”’)]*)(\s+)([\s\S]*)$/;
-    let m;
-    while ((m = re.exec(this.ttsPending))) {
-      const sentence = m[1].trim();
-      this.ttsPending = m[3];
-      if (sentence) this.enqueueTTS(sentence);
-    }
-    // Si se acumula mucho texto sin puntuación, cortar por el último espacio.
-    if (!force && this.ttsPending.length > 140) {
-      const cut = this.ttsPending.lastIndexOf(' ', 140);
-      if (cut > 40) {
-        const seg = this.ttsPending.slice(0, cut).trim();
-        this.ttsPending = this.ttsPending.slice(cut + 1);
-        if (seg) this.enqueueTTS(seg);
-      }
-    }
-    // Al cerrar la frase, mandar el resto pendiente aunque no tenga punto.
-    if (force) {
-      const rest = this.ttsPending.trim();
-      this.ttsPending = '';
-      if (rest) this.enqueueTTS(rest);
-    }
-  }
-
-  enqueueTTS(text) {
-    this.ttsQueue.push(text);
-    this.drainTTS();
-  }
-
-  async drainTTS() {
-    if (this.ttsBusy) return;
-    const text = this.ttsQueue.shift();
-    if (text === undefined) return;
-    this.ttsBusy = true;
-    try {
-      await this.synthesize(text);
-    } catch (err) {
-      console.error(`[Voz:${this.targetLang}] ElevenLabs falló:`, err?.message || String(err));
-      this.toListeners({ type: 'voice_error', message: 'No se pudo generar la voz (revisa la key/plan de ElevenLabs).' });
-    } finally {
-      this.ttsBusy = false;
-      if (this.ttsQueue.length) this.drainTTS();
-    }
-  }
-
-  async synthesize(text) {
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE}?output_format=mp3_44100_128`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        model_id: ELEVEN_MODEL,
-        voice_settings: { stability: 0.4, similarity_boost: 0.8, style: 0.2, use_speaker_boost: true },
-      }),
-    });
-    if (!res.ok) {
-      const errTxt = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status} ${errTxt.slice(0, 200)}`);
-    }
-    const ab = await res.arrayBuffer();
-    const b64 = Buffer.from(ab).toString('base64');
-    // Un clip MP3 completo por frase; el navegador lo decodifica y encola.
-    this.toListeners({ type: 'audio_clip', b64 });
   }
 
   connect() {
@@ -587,18 +491,15 @@ class LangSession {
         if (!this.currentItemId) this.currentItemId = `p-${++this.phraseCount}`;
         if (this.gapTimer) clearTimeout(this.gapTimer);
         this.gapTimer = setTimeout(() => this.finishPhrase(), PHRASE_SAFETY_MS);
-        // Con ElevenLabs ignoramos la voz de OpenAI (la generamos nosotros al
-        // cerrar la frase). Sin ElevenLabs, streameamos la de OpenAI como antes.
-        if (!USE_ELEVEN) this.toListeners({ type: 'audio', chunk: event.delta });
+        // Voz nativa del modelo (conserva el tono/voz del hablante) en streaming.
+        this.toListeners({ type: 'audio', chunk: event.delta });
       }
 
       if (event.type === 'session.output_transcript.delta') {
         if (!this.currentItemId) this.currentItemId = `p-${++this.phraseCount}`;
         this.outputBuf += event.delta || '';
-        this.ttsPending += event.delta || '';
         if (this.gapTimer) clearTimeout(this.gapTimer);
         this.gapTimer = setTimeout(() => this.finishPhrase(), PHRASE_SAFETY_MS);
-        this.pumpTTS(false);   // habla oraciones completas apenas llegan
         this.toListeners({ type: 'partial', text: this.outputBuf });
       }
 
