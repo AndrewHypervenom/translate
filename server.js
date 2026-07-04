@@ -10,65 +10,22 @@ if (!process.env.OPENAI_API_KEY) {
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
 
-// ── Kill switch global ────────────────────────────────────────────────────────
-let serviceEnabled = true;
+// Tres canales WebSocket sobre el mismo servidor HTTP (ruteo manual en 'upgrade'),
+// todos usados por la extensión de Chrome:
+//   /ws        → traducción 1-a-1 (modo Teams)
+//   /broadcast → el emisor: captura su micrófono y envía audio
+//   /listen    → cada oyente: elige idioma y recibe audio + subtítulos
+const wss = new WebSocketServer({ noServer: true });
+const broadcastWss = new WebSocketServer({ noServer: true });
+const listenWss = new WebSocketServer({ noServer: true });
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate';
 
-function broadcastAll(data) {
-  const msg = JSON.stringify(data);
-  wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
-}
-
-// ── Admin HTTP routes ─────────────────────────────────────────────────────────
-
-app.use('/api/status', (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  next();
-});
-
-app.use('/admin/toggle', (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
-  next();
-});
-
-function requireAdminToken(req, res, next) {
-  const adminToken = process.env.ADMIN_TOKEN;
-  if (!adminToken) {
-    return res.status(500).json({ error: 'ADMIN_TOKEN no está configurado en el servidor.' });
-  }
-  const auth = req.headers.authorization || '';
-  if (auth !== `Bearer ${adminToken}`) {
-    return res.status(401).json({ error: 'Token de administrador incorrecto.' });
-  }
-  next();
-}
+// ── HTTP routes ───────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
-});
-
-app.get('/api/status', (_req, res) => {
-  res.json({ enabled: serviceEnabled, clients: wss.clients.size });
-});
-
-app.post('/admin/toggle', express.json(), requireAdminToken, (_req, res) => {
-  serviceEnabled = !serviceEnabled;
-  console.log(`[Admin] Servicio ${serviceEnabled ? 'HABILITADO ✓' : 'DESHABILITADO ✗'}`);
-  if (!serviceEnabled) {
-    wss.clients.forEach(c => {
-      if (c.readyState === WebSocket.OPEN) {
-        c.send(JSON.stringify({ type: 'error', message: 'El servicio fue deshabilitado por el administrador.' }));
-        c.close(1008, 'Service disabled');
-      }
-    });
-  }
-  res.json({ enabled: serviceEnabled });
 });
 
 app.get('/privacy', (_req, res) => {
@@ -92,11 +49,12 @@ app.get('/privacy', (_req, res) => {
   <h1>Política de Privacidad</h1>
   <p class="updated">Última actualización: mayo de 2026</p>
 
-  <p><strong>PositivoS+ en vivo</strong> es una extensión de Chrome que realiza traducción simultánea de voz en reuniones de Microsoft Teams.</p>
+  <p><strong>PositivoS+ en vivo</strong> es una extensión de Chrome que realiza traducción simultánea de voz: transmite tu micrófono para que cada oyente escuche en su idioma, y también traduce reuniones de Microsoft Teams.</p>
 
   <h2>Datos que se procesan</h2>
   <ul>
-    <li><strong>Audio de la reunión:</strong> El audio de la pestaña de Teams se captura localmente en tu navegador, se envía a nuestro servidor seguro y se reenvía a la API de OpenAI únicamente para realizar la traducción en tiempo real. No se almacena ningún audio.</li>
+    <li><strong>Audio del micrófono (modo Transmitir):</strong> Si eliges transmitir, el audio de tu micrófono se envía a nuestro servidor seguro y se reenvía a la API de OpenAI únicamente para realizar la traducción en tiempo real. Solo se captura mientras la transmisión está activa y no se almacena ningún audio.</li>
+    <li><strong>Audio de la reunión (modo Teams):</strong> El audio de la pestaña de Teams se captura localmente en tu navegador, se envía a nuestro servidor seguro y se reenvía a la API de OpenAI únicamente para realizar la traducción en tiempo real. No se almacena ningún audio.</li>
     <li><strong>Configuración:</strong> Tus preferencias de idioma y voz se guardan localmente en Chrome Storage Sync. No se comparten con terceros.</li>
   </ul>
 
@@ -108,10 +66,11 @@ app.get('/privacy', (_req, res) => {
   </ul>
 
   <h2>Servicios de terceros</h2>
-  <p>El audio es procesado por <a href="https://openai.com/policies/privacy-policy" target="_blank">OpenAI</a> exclusivamente para la traducción. Consulta su política de privacidad para más detalles.</p>
+  <p>El audio es procesado por <a href="https://openai.com/policies/privacy-policy" target="_blank">OpenAI</a> exclusivamente para la traducción. La voz traducida puede generarse con <a href="https://elevenlabs.io/privacy-policy" target="_blank">ElevenLabs</a> a partir del texto ya traducido. Consulta sus políticas de privacidad para más detalles.</p>
 
   <h2>Permisos de Chrome</h2>
   <ul>
+    <li><strong>Micrófono:</strong> Solo si eliges el modo Transmitir; Chrome pide tu autorización explícita antes de capturar.</li>
     <li><strong>tabCapture:</strong> Para capturar el audio de la pestaña de Teams.</li>
     <li><strong>offscreen:</strong> Para procesar el audio en segundo plano.</li>
     <li><strong>storage:</strong> Para guardar tu configuración de idioma localmente.</li>
@@ -124,252 +83,18 @@ app.get('/privacy', (_req, res) => {
 </html>`);
 });
 
-app.get('/admin', (_req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PositivoS+ — Panel de Control</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0f1117;
-      color: #e1e4e8;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-    }
-    .card {
-      background: #1c2030;
-      border-radius: 16px;
-      padding: 40px 36px;
-      width: 100%;
-      max-width: 440px;
-      border: 1px solid #2d3148;
-      text-align: center;
-    }
-    .brand {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      color: #5b6bdd;
-      margin-bottom: 8px;
-    }
-    h1 {
-      font-size: 22px;
-      font-weight: 700;
-      color: #fff;
-      margin-bottom: 32px;
-    }
-    .status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      padding: 12px 22px;
-      border-radius: 999px;
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 12px;
-    }
-    .status-badge.enabled {
-      background: rgba(52,211,153,0.12);
-      color: #34d399;
-      border: 1px solid rgba(52,211,153,0.3);
-    }
-    .status-badge.disabled {
-      background: rgba(239,68,68,0.12);
-      color: #ef4444;
-      border: 1px solid rgba(239,68,68,0.3);
-    }
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      background: currentColor;
-      flex-shrink: 0;
-    }
-    .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
-    .clients {
-      font-size: 12px;
-      color: #7c85a2;
-      margin-bottom: 32px;
-      height: 16px;
-    }
-    .field { text-align: left; margin-bottom: 16px; }
-    label {
-      display: block;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      color: #7c85a2;
-      margin-bottom: 7px;
-    }
-    input[type=password] {
-      width: 100%;
-      padding: 11px 13px;
-      background: #0f1117;
-      border: 1px solid #2d3148;
-      border-radius: 8px;
-      color: #e1e4e8;
-      font-size: 14px;
-      outline: none;
-      transition: border-color .2s;
-    }
-    input[type=password]:focus { border-color: #5b6bdd; }
-    button#toggleBtn {
-      width: 100%;
-      padding: 13px;
-      border: none;
-      border-radius: 8px;
-      font-size: 15px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: filter .15s, opacity .15s;
-      letter-spacing: .3px;
-    }
-    button#toggleBtn:hover:not(:disabled) { filter: brightness(1.1); }
-    button#toggleBtn:disabled { opacity: .55; cursor: not-allowed; }
-    button#toggleBtn.btn-disable { background: #ef4444; color: #fff; }
-    button#toggleBtn.btn-enable  { background: #34d399; color: #000; }
-    .msg {
-      margin-top: 16px;
-      font-size: 13px;
-      min-height: 18px;
-      transition: color .2s;
-    }
-    .msg.ok  { color: #34d399; }
-    .msg.err { color: #ef4444; }
-    .footer {
-      margin-top: 28px;
-      font-size: 11px;
-      color: #3d4561;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="brand">PositivoS+ en vivo</div>
-    <h1>Panel de Control</h1>
-
-    <div id="statusBadge" class="status-badge">
-      <span class="dot" id="dot"></span>
-      <span id="statusText">Cargando…</span>
-    </div>
-    <div class="clients" id="clients"></div>
-
-    <form id="form">
-      <div class="field">
-        <label for="token">Token de administrador</label>
-        <input type="password" id="token" placeholder="••••••••••••" autocomplete="off">
-      </div>
-      <button type="submit" id="toggleBtn" disabled>Cargando…</button>
-    </form>
-
-    <div class="msg" id="msg"></div>
-    <div class="footer">Estado actualizado automáticamente cada 5 s</div>
-  </div>
-
-  <script>
-    var currentEnabled = null;
-
-    function updateUI(enabled, clients) {
-      currentEnabled = enabled;
-      var badge = document.getElementById('statusBadge');
-      var dot   = document.getElementById('dot');
-      var text  = document.getElementById('statusText');
-      var btn   = document.getElementById('toggleBtn');
-      var cli   = document.getElementById('clients');
-
-      badge.className = 'status-badge ' + (enabled ? 'enabled' : 'disabled');
-      dot.className   = 'dot' + (enabled ? ' pulse' : '');
-      text.textContent = enabled
-        ? 'ACTIVO — consumiendo tokens'
-        : 'DESACTIVADO — sin consumo de tokens';
-      btn.className   = enabled ? 'btn-disable' : 'btn-enable';
-      btn.textContent = enabled ? 'Desactivar servicio' : 'Activar servicio';
-      btn.disabled    = false;
-
-      if (typeof clients === 'number') {
-        cli.textContent = clients === 0
-          ? 'Sin usuarios conectados'
-          : clients + ' usuario' + (clients === 1 ? '' : 's') + ' conectado' + (clients === 1 ? '' : 's');
-      }
-    }
-
-    function setMsg(text, type) {
-      var el = document.getElementById('msg');
-      el.textContent = text;
-      el.className = 'msg ' + (type || '');
-      if (text) setTimeout(function() { el.textContent = ''; el.className = 'msg'; }, 5000);
-    }
-
-    function fetchStatus() {
-      fetch('/api/status')
-        .then(function(r) { return r.json(); })
-        .then(function(d) { updateUI(d.enabled, d.clients); })
-        .catch(function() { setMsg('No se puede conectar al servidor', 'err'); });
-    }
-
-    document.getElementById('form').addEventListener('submit', function(e) {
-      e.preventDefault();
-      var token = document.getElementById('token').value.trim();
-      if (!token) { setMsg('Ingresa el token de administrador', 'err'); return; }
-
-      var btn = document.getElementById('toggleBtn');
-      btn.disabled = true;
-      btn.textContent = 'Procesando…';
-
-      fetch('/admin/toggle', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
-      })
-        .then(function(r) {
-          if (r.status === 401) {
-            setMsg('Token incorrecto', 'err');
-            fetchStatus();
-            return null;
-          }
-          return r.json();
-        })
-        .then(function(d) {
-          if (!d) return;
-          updateUI(d.enabled);
-          setMsg(
-            d.enabled ? 'Servicio activado correctamente' : 'Servicio desactivado — tokens protegidos',
-            'ok'
-          );
-        })
-        .catch(function() {
-          setMsg('Error al conectar con el servidor', 'err');
-          fetchStatus();
-        });
-    });
-
-    fetchStatus();
-    setInterval(fetchStatus, 5000);
-  </script>
-</body>
-</html>`);
-});
-
 wss.on('connection', (clientWs) => {
-  if (!serviceEnabled) {
-    clientWs.send(JSON.stringify({ type: 'error', message: 'El servicio está deshabilitado por el administrador.' }));
-    clientWs.close(1008, 'Service disabled');
-    return;
-  }
-
   let config = { sourceLang: 'pt', targetLang: 'es' };
   let openaiWs = null;
   let openaiReady = false;
   let audioQueue = [];
+
+  // Reconexión automática a OpenAI si la sesión se cae a mitad de la reunión
+  let wantActive = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  const MAX_RECONNECT_ATTEMPTS = 5;
+  const MAX_QUEUED_CHUNKS = 120; // ~10 s de audio retenido durante la reconexión
 
   let currentItemId = null;
   let phraseCount = 0;
@@ -404,7 +129,7 @@ wss.on('connection', (clientWs) => {
     phraseStarted = false;
 
     // Siempre ocultar "EN VIVO" aunque no haya llegado audio de salida
-    broadcastAll({ type: 'conversation.item.input_audio_transcription.completed', transcript: original });
+    send({ type: 'conversation.item.input_audio_transcription.completed', transcript: original });
 
     if (id) {
       send({ type: 'tts_done', item_id: id });
@@ -416,21 +141,37 @@ wss.on('connection', (clientWs) => {
     }
   }
 
+  function scheduleReconnect() {
+    if (!wantActive || reconnectTimer) return;
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      send({ type: 'error', message: 'No se pudo restablecer la conexión con OpenAI. Detén y vuelve a iniciar la traducción.' });
+      return;
+    }
+    const delay = Math.min(1000 * 2 ** reconnectAttempts, 8000);
+    reconnectAttempts++;
+    console.log(`[OpenAI] Reintentando conexión en ${delay} ms (intento ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (wantActive) connectToOpenAI();
+    }, delay);
+  }
+
   function connectToOpenAI() {
     openaiReady = false;
-    audioQueue = [];
     currentItemId = null;
     outputTranscriptBuf = '';
     inputTranscriptBuf = '';
     phraseStarted = false;
 
-    openaiWs = new WebSocket(REALTIME_URL, {
+    const sock = new WebSocket(REALTIME_URL, {
       headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     });
+    openaiWs = sock;
 
-    openaiWs.on('open', () => {
+    sock.on('open', () => {
+      if (sock !== openaiWs) { sock.close(); return; }
       console.log('[OpenAI] Conectado — configurando sesión gpt-realtime-translate');
-      openaiWs.send(JSON.stringify({
+      sock.send(JSON.stringify({
         type: 'session.update',
         session: {
           audio: {
@@ -442,35 +183,44 @@ wss.on('connection', (clientWs) => {
         },
       }));
       openaiReady = true;
+      reconnectAttempts = 0;
       flushQueue();
       send({ type: 'ready' });
     });
 
-    openaiWs.on('message', (raw) => {
+    sock.on('message', (raw) => {
+      if (sock !== openaiWs) return;
       const event = JSON.parse(raw.toString());
 
       if (event.type === 'session.output_audio.delta') {
         if (!currentItemId) currentItemId = newPhraseId();
         if (audioGapTimer) clearTimeout(audioGapTimer);
-        audioGapTimer = setTimeout(finishCurrentPhrase, 600);
+        audioGapTimer = setTimeout(finishCurrentPhrase, 1500);
         send({ type: 'tts_chunk', item_id: currentItemId, audio: event.delta });
       }
 
       if (event.type === 'session.output_transcript.delta') {
         if (!currentItemId) currentItemId = newPhraseId();
         outputTranscriptBuf += event.delta || '';
+        // El texto en streaming también mantiene viva la frase, no solo el audio
+        if (audioGapTimer) { clearTimeout(audioGapTimer); audioGapTimer = setTimeout(finishCurrentPhrase, 1500); }
         send({ type: 'translation_partial', item_id: currentItemId, delta: event.delta });
       }
 
       if (event.type === 'session.input_transcript.delta') {
         if (!phraseStarted) {
           phraseStarted = true;
-          broadcastAll({ type: 'input_audio_buffer.committed' });
+          send({ type: 'input_audio_buffer.committed' });
         }
         inputTranscriptBuf += event.delta || '';
-        broadcastAll({ type: 'conversation.item.input_audio_transcription.delta', delta: event.delta });
+        send({ type: 'conversation.item.input_audio_transcription.delta', delta: event.delta });
         if (inputIdleTimer) clearTimeout(inputIdleTimer);
-        inputIdleTimer = setTimeout(finishCurrentPhrase, 3000);
+        inputIdleTimer = setTimeout(() => {
+          inputIdleTimer = null;
+          // Red de seguridad: solo cerrar si no hay una traducción en curso;
+          // si la hay, su propio done/gap cerrará la frase sin cortarla.
+          if (!currentItemId) finishCurrentPhrase();
+        }, 3000);
       }
 
       // Transcripción final del idioma original — reemplaza los deltas provisionales
@@ -480,7 +230,7 @@ wss.on('connection', (clientWs) => {
         if (finalText) {
           inputTranscriptBuf = finalText;
           // Reemplazar texto del overlay "EN VIVO" con la versión final corregida
-          broadcastAll({ type: 'source_transcript_final', text: finalText });
+          send({ type: 'source_transcript_final', text: finalText });
         }
       }
 
@@ -493,10 +243,12 @@ wss.on('connection', (clientWs) => {
 
       if (event.type === 'session.closed') {
         finishCurrentPhrase();
-        const ws = openaiWs;
         openaiWs = null;
         openaiReady = false;
-        ws?.close();
+        sock.close();
+        // Si OpenAI cerró la sesión pero el usuario sigue traduciendo
+        // (p. ej. límite de duración), abrir una sesión nueva.
+        if (wantActive) scheduleReconnect();
       }
 
       if (event.type === 'error') {
@@ -506,18 +258,20 @@ wss.on('connection', (clientWs) => {
       }
     });
 
-    openaiWs.on('error', (err) => {
+    sock.on('error', (err) => {
       console.error('[OpenAI] WS error:', err?.message || String(err));
-      send({ type: 'error', message: err?.message || 'OpenAI WebSocket error' });
     });
 
-    openaiWs.on('close', (code, reason) => {
+    sock.on('close', (code, reason) => {
+      if (sock !== openaiWs) return; // socket viejo, ya reemplazado o cerrado a propósito
+      openaiWs = null;
       openaiReady = false;
       finishCurrentPhrase();
       const reasonStr = reason?.length ? reason.toString() : '';
       console.log(`[OpenAI] WS cerrado: code=${code}${reasonStr ? ' — ' + reasonStr : ''}`);
-      if (code !== 1000 && code !== 1001) {
-        send({ type: 'error', message: `OpenAI desconectado (${code})${reasonStr ? ': ' + reasonStr : ''}` });
+      if (code !== 1000 && code !== 1001 && wantActive) {
+        // Cierre inesperado a mitad de sesión: reconectar sin molestar al usuario
+        scheduleReconnect();
       }
     });
   }
@@ -541,10 +295,15 @@ wss.on('connection', (clientWs) => {
         break;
 
       case 'start':
+        wantActive = true;
+        reconnectAttempts = 0;
+        audioQueue = [];
         connectToOpenAI();
         break;
 
       case 'stop':
+        wantActive = false;
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         openaiReady = false;
         audioQueue = [];
         if (openaiWs?.readyState === WebSocket.OPEN) {
@@ -560,7 +319,8 @@ wss.on('connection', (clientWs) => {
         if (!msg.audio) break;
         if (openaiReady && openaiWs?.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({ type: 'session.input_audio_buffer.append', audio: msg.audio }));
-        } else if (audioQueue.length < 12) {
+        } else if (audioQueue.length < MAX_QUEUED_CHUNKS) {
+          // Retener el audio mientras se (re)conecta a OpenAI para no perder frases
           audioQueue.push(msg.audio);
         }
         break;
@@ -568,14 +328,572 @@ wss.on('connection', (clientWs) => {
   });
 
   clientWs.on('close', () => {
+    wantActive = false;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (audioGapTimer) { clearTimeout(audioGapTimer); audioGapTimer = null; }
+    if (inputIdleTimer) { clearTimeout(inputIdleTimer); inputIdleTimer = null; }
     if (openaiWs?.readyState === WebSocket.OPEN) {
       openaiWs.send(JSON.stringify({ type: 'session.close' }));
     }
     openaiWs?.close();
+    openaiWs = null;
   });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODO TRANSMISIÓN: 1 emisor → N oyentes, cada uno en su idioma
+// ════════════════════════════════════════════════════════════════════════════
+//
+// El emisor (/broadcast) envía su audio una sola vez. Por cada idioma que algún
+// oyente pida, abrimos una sesión independiente con OpenAI y le reenviamos ese
+// mismo audio. La salida (voz traducida + texto) de cada sesión se difunde a
+// todos los oyentes suscritos a ese idioma.
+
+const MAX_QUEUED_CHUNKS = 120; // ~10 s de audio retenido mientras conecta OpenAI
+
+// El fin de frase lo marca OpenAI con 'output_transcript.done'. Este temporizador
+// es SOLO una red de seguridad por si ese evento nunca llega. Debe ser holgado:
+// si es corto, corta la frase a la mitad cuando se habla rápido/continuo y manda
+// el subtítulo incompleto.
+const PHRASE_SAFETY_MS = 5000;
+
+// ── ElevenLabs: voz de alta calidad para el audio traducido ───────────────────
+// Si hay ELEVENLABS_API_KEY, sintetizamos la voz con ElevenLabs a partir del
+// texto ya traducido por OpenAI (mucho más natural y expresiva). Si no hay key,
+// caemos automáticamente al audio del propio modelo de OpenAI: la demo nunca se
+// rompe, solo cambia la calidad de la voz.
+// Usamos MP3 (funciona en cualquier plan de ElevenLabs, incluido el gratis) y lo
+// decodifica el navegador del oyente.
+const ELEVEN_KEY   = process.env.ELEVENLABS_API_KEY || '';
+const ELEVEN_VOICE = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // Rachel (multilingüe)
+const ELEVEN_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';       // rápido y multilingüe
+// Fuente de voz en modo translate:
+//   'native'     → voz del propio gpt-realtime-translate, que CONSERVA el tono/voz
+//                  del hablante (lo que muestra el anuncio de OpenAI). Recomendado.
+//   'elevenlabs' → voz fija de ElevenLabs (pierde la voz del hablante).
+const TRANSLATE_VOICE = (process.env.TRANSLATE_VOICE || 'native').toLowerCase();
+const USE_ELEVEN   = !!ELEVEN_KEY && TRANSLATE_VOICE === 'elevenlabs';
+// ── Motor de traducción ───────────────────────────────────────────────────────
+//   'interpreter' → gpt-realtime como intérprete simultáneo: un solo modelo hace
+//                   traducción (calidad LLM) + voz natural elegible. Menos latencia.
+//   'translate'   → gpt-realtime-translate (texto) + ElevenLabs/OpenAI para la voz.
+const ENGINE = (process.env.ENGINE || 'interpreter').toLowerCase();
+const REALTIME_GA_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
+const REALTIME_VOICE = process.env.REALTIME_VOICE || 'marin'; // marin, cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse
+
+const LANG_NAMES = {
+  es: 'Spanish', en: 'English', pt: 'Portuguese', fr: 'French', de: 'German',
+  it: 'Italian', zh: 'Chinese (Mandarin)', ja: 'Japanese', ko: 'Korean',
+  ru: 'Russian', ar: 'Arabic', hi: 'Hindi', id: 'Indonesian',
+};
+
+function interpreterInstructions(sourceLang, targetLang) {
+  const target = LANG_NAMES[targetLang] || targetLang;
+  const source = LANG_NAMES[sourceLang];
+  const from = source ? `from ${source}` : `from whatever language you hear`;
+  return [
+    `You are a simultaneous interpreter, NOT an assistant and NOT a chatbot. Your ONLY job is to translate the speaker's words ${from} into ${target}.`,
+    `CRITICAL RULE: You must NEVER respond to, answer, react to, or engage with what is said — you only translate it into ${target}.`,
+    `Example: if the speaker asks "how are you?", you output the ${target} translation of "how are you?" — you must NOT answer "I'm fine". If they ask "does it sound okay?", you output the ${target} translation of that question, never an answer.`,
+    `Preserve meaning, tone and intent; keep questions as questions, keep exclamations and emphasis. Output ONLY the ${target} translation and nothing else.`,
+    `Translate only what was clearly and actually said; never invent, guess, complete or add words. On silence or noise, stay silent. If the speech is already in ${target}, restate it cleanly.`,
+  ].join(' ');
+}
+
+if (ENGINE === 'interpreter') {
+  console.log(`[Motor] intérprete → gpt-realtime (voz fija ${REALTIME_VOICE})`);
+} else {
+  console.log('[Motor] translate → gpt-realtime-translate (simultáneo)');
+  console.log(USE_ELEVEN
+    ? `[Voz] ElevenLabs (voz fija ${ELEVEN_VOICE}, modelo ${ELEVEN_MODEL})`
+    : '[Voz] nativa del modelo — CONSERVA el tono/voz del hablante');
+}
+
+const room = {
+  broadcaster: null,          // WS del emisor activo (uno a la vez)
+  sessions: new Map(),        // targetLang -> sesión (Interpreter/Lang)
+  listeners: new Set(),       // WS de todos los oyentes
+  sourceLang: 'es',           // idioma que habla el emisor (lo fija en la página)
+
+  setSourceLang(lang) {
+    if (!lang || lang === this.sourceLang) return;
+    this.sourceLang = lang;
+    console.log(`[Room] Idioma del emisor → ${lang}`);
+    for (const s of this.sessions.values()) {
+      if (typeof s.updateSourceLang === 'function') s.updateSourceLang();
+    }
+  },
+
+  primarySession() {
+    // La primera sesión creada relaya la transcripción del idioma original
+    // al emisor (todas transcriben lo mismo; evitamos duplicar).
+    return this.sessions.values().next().value || null;
+  },
+
+  broadcastToListeners(lang, data) {
+    const s = this.sessions.get(lang);
+    if (!s) return;
+    for (const ws of s.listeners) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+    }
+  },
+
+  sendToBroadcaster(data) {
+    if (this.broadcaster && this.broadcaster.readyState === WebSocket.OPEN) {
+      this.broadcaster.send(JSON.stringify(data));
+    }
+  },
+
+  ensureSession(lang) {
+    let s = this.sessions.get(lang);
+    if (!s) {
+      s = ENGINE === 'interpreter' ? new InterpreterSession(lang) : new LangSession(lang);
+      this.sessions.set(lang, s);
+      s.connect();
+    }
+    return s;
+  },
+
+  appendAudio(base64) {
+    for (const s of this.sessions.values()) s.appendAudio(base64);
+  },
+
+  removeSessionIfEmpty(lang) {
+    const s = this.sessions.get(lang);
+    if (s && s.listeners.size === 0) {
+      s.close();
+      this.sessions.delete(lang);
+    }
+  },
+};
+
+// Una sesión de traducción con OpenAI para un idioma destino concreto.
+class LangSession {
+  constructor(targetLang) {
+    this.targetLang = targetLang;
+    this.listeners = new Set();
+    this.openaiWs = null;
+    this.ready = false;
+    this.audioQueue = [];
+    this.currentItemId = null;
+    this.phraseCount = 0;
+    this.outputBuf = '';
+    this.inputBuf = '';
+    this.gapTimer = null;
+    this.ttsQueue = [];      // segmentos de texto pendientes de sintetizar (ElevenLabs)
+    this.ttsBusy = false;
+    this.ttsPending = '';    // texto traducido aún no enviado a TTS (se corta por oraciones)
+  }
+
+  isPrimary() { return room.primarySession() === this; }
+
+  toListeners(data) {
+    for (const ws of this.listeners) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+    }
+  }
+
+  finishPhrase() {
+    if (this.gapTimer) { clearTimeout(this.gapTimer); this.gapTimer = null; }
+    const translation = this.outputBuf.trim();
+    if (translation) this.toListeners({ type: 'final', text: translation });
+    // Sintetizar lo que quede pendiente (última oración sin punto final).
+    this.pumpTTS(true);
+    this.currentItemId = null;
+    this.outputBuf = '';
+    this.inputBuf = '';
+  }
+
+  // ── Voz con ElevenLabs (cola serializada para no solapar segmentos) ─────────
+  // Para bajar la latencia sintetizamos por ORACIONES a medida que llegan, en
+  // lugar de esperar a que termine toda la frase.
+  pumpTTS(force) {
+    if (!USE_ELEVEN) return;
+    // Sacar oraciones completas (terminadas en . ! ? … seguidas de espacio).
+    const re = /^([\s\S]*?[.!?…]+["'”’)]*)(\s+)([\s\S]*)$/;
+    let m;
+    while ((m = re.exec(this.ttsPending))) {
+      const sentence = m[1].trim();
+      this.ttsPending = m[3];
+      if (sentence) this.enqueueTTS(sentence);
+    }
+    // Si se acumula mucho texto sin puntuación, cortar por el último espacio.
+    if (!force && this.ttsPending.length > 140) {
+      const cut = this.ttsPending.lastIndexOf(' ', 140);
+      if (cut > 40) {
+        const seg = this.ttsPending.slice(0, cut).trim();
+        this.ttsPending = this.ttsPending.slice(cut + 1);
+        if (seg) this.enqueueTTS(seg);
+      }
+    }
+    // Al cerrar la frase, mandar el resto pendiente aunque no tenga punto.
+    if (force) {
+      const rest = this.ttsPending.trim();
+      this.ttsPending = '';
+      if (rest) this.enqueueTTS(rest);
+    }
+  }
+
+  enqueueTTS(text) {
+    this.ttsQueue.push(text);
+    this.drainTTS();
+  }
+
+  async drainTTS() {
+    if (this.ttsBusy) return;
+    const text = this.ttsQueue.shift();
+    if (text === undefined) return;
+    this.ttsBusy = true;
+    try {
+      await this.synthesize(text);
+    } catch (err) {
+      console.error(`[Voz:${this.targetLang}] ElevenLabs falló:`, err?.message || String(err));
+      this.toListeners({ type: 'voice_error', message: 'No se pudo generar la voz (revisa la key/plan de ElevenLabs).' });
+    } finally {
+      this.ttsBusy = false;
+      if (this.ttsQueue.length) this.drainTTS();
+    }
+  }
+
+  async synthesize(text) {
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE}?output_format=mp3_44100_128`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        model_id: ELEVEN_MODEL,
+        voice_settings: { stability: 0.4, similarity_boost: 0.8, style: 0.2, use_speaker_boost: true },
+      }),
+    });
+    if (!res.ok) {
+      const errTxt = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status} ${errTxt.slice(0, 200)}`);
+    }
+    const ab = await res.arrayBuffer();
+    const b64 = Buffer.from(ab).toString('base64');
+    // Un clip MP3 completo por frase; el navegador lo decodifica y encola.
+    this.toListeners({ type: 'audio_clip', b64 });
+  }
+
+  connect() {
+    this.ready = false;
+    const sock = new WebSocket(REALTIME_URL, {
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    });
+    this.openaiWs = sock;
+
+    sock.on('open', () => {
+      if (sock !== this.openaiWs) { sock.close(); return; }
+      console.log(`[Room] Sesión OpenAI lista → ${this.targetLang}`);
+      sock.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          audio: {
+            input: {
+              transcription: { model: 'gpt-realtime-whisper' },
+              // Micrófono cercano: limpia ruido de fondo sin cortar la voz.
+              noise_reduction: { type: 'near_field' },
+            },
+            output: { language: this.targetLang },
+          },
+        },
+      }));
+      this.ready = true;
+      while (this.audioQueue.length && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'session.input_audio_buffer.append', audio: this.audioQueue.shift() }));
+      }
+      this.toListeners({ type: 'ready', lang: this.targetLang });
+    });
+
+    sock.on('message', (raw) => {
+      if (sock !== this.openaiWs) return;
+      let event; try { event = JSON.parse(raw.toString()); } catch { return; }
+
+      if (event.type === 'session.output_audio.delta') {
+        if (!this.currentItemId) this.currentItemId = `p-${++this.phraseCount}`;
+        if (this.gapTimer) clearTimeout(this.gapTimer);
+        this.gapTimer = setTimeout(() => this.finishPhrase(), PHRASE_SAFETY_MS);
+        // Con ElevenLabs ignoramos la voz de OpenAI (la generamos nosotros al
+        // cerrar la frase). Sin ElevenLabs, streameamos la de OpenAI como antes.
+        if (!USE_ELEVEN) this.toListeners({ type: 'audio', chunk: event.delta });
+      }
+
+      if (event.type === 'session.output_transcript.delta') {
+        if (!this.currentItemId) this.currentItemId = `p-${++this.phraseCount}`;
+        this.outputBuf += event.delta || '';
+        this.ttsPending += event.delta || '';
+        if (this.gapTimer) clearTimeout(this.gapTimer);
+        this.gapTimer = setTimeout(() => this.finishPhrase(), PHRASE_SAFETY_MS);
+        this.pumpTTS(false);   // habla oraciones completas apenas llegan
+        this.toListeners({ type: 'partial', text: this.outputBuf });
+      }
+
+      if (event.type === 'session.output_transcript.done') {
+        const t = event.transcript?.trim() || event.text?.trim() || '';
+        if (t) this.outputBuf = t;
+        this.finishPhrase();
+      }
+
+      // La sesión primaria relaya el texto original (lo que dijo el emisor)
+      // de vuelta al emisor, como confirmación en pantalla.
+      if (event.type === 'session.input_transcript.delta' && this.isPrimary()) {
+        this.inputBuf += event.delta || '';
+        room.sendToBroadcaster({ type: 'source_partial', text: this.inputBuf });
+      }
+      if (event.type === 'session.input_transcript.done' && this.isPrimary()) {
+        const t = event.transcript?.trim() || event.text?.trim() || '';
+        if (t) { this.inputBuf = ''; room.sendToBroadcaster({ type: 'source_final', text: t }); }
+      }
+
+      if (event.type === 'session.closed') {
+        this.finishPhrase();
+        this.openaiWs = null; this.ready = false; sock.close();
+        // Si aún hay oyentes, reabrir sesión (p. ej. límite de duración de OpenAI)
+        if (this.listeners.size > 0) this.connect();
+      }
+
+      if (event.type === 'error') {
+        const msg = event.error?.message || 'OpenAI error';
+        console.error(`[Room:${this.targetLang}] Error:`, msg);
+        this.toListeners({ type: 'error', message: msg });
+      }
+    });
+
+    sock.on('error', (err) => console.error(`[Room:${this.targetLang}] WS error:`, err?.message || String(err)));
+    sock.on('close', (code) => {
+      if (sock !== this.openaiWs) return;
+      this.openaiWs = null; this.ready = false; this.finishPhrase();
+      if (code !== 1000 && code !== 1001 && this.listeners.size > 0) {
+        setTimeout(() => { if (this.listeners.size > 0) this.connect(); }, 1000);
+      }
+    });
+  }
+
+  appendAudio(base64) {
+    if (this.ready && this.openaiWs?.readyState === WebSocket.OPEN) {
+      this.openaiWs.send(JSON.stringify({ type: 'session.input_audio_buffer.append', audio: base64 }));
+    } else if (this.audioQueue.length < MAX_QUEUED_CHUNKS) {
+      this.audioQueue.push(base64);
+    }
+  }
+
+  close() {
+    if (this.gapTimer) clearTimeout(this.gapTimer);
+    if (this.openaiWs?.readyState === WebSocket.OPEN) {
+      this.openaiWs.send(JSON.stringify({ type: 'session.close' }));
+    }
+    this.openaiWs?.close();
+    this.openaiWs = null;
+  }
+}
+
+// Sesión de intérprete con gpt-realtime (GA): traduce + voz natural en un modelo.
+// El propio modelo detecta el fin de turno (semantic_vad) y responde solo.
+class InterpreterSession {
+  constructor(targetLang) {
+    this.targetLang = targetLang;
+    this.listeners = new Set();
+    this.openaiWs = null;
+    this.ready = false;
+    this.audioQueue = [];
+    this.outputBuf = '';
+    this.inputBuf = '';
+  }
+
+  isPrimary() { return room.primarySession() === this; }
+
+  toListeners(data) {
+    for (const ws of this.listeners) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+    }
+  }
+
+  connect() {
+    this.ready = false;
+    const sock = new WebSocket(REALTIME_GA_URL, {
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    });
+    this.openaiWs = sock;
+
+    sock.on('open', () => {
+      if (sock !== this.openaiWs) { sock.close(); return; }
+      console.log(`[Intérprete] Sesión lista → ${this.targetLang} (voz ${REALTIME_VOICE})`);
+      sock.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          type: 'realtime',
+          output_modalities: ['audio'],
+          instructions: interpreterInstructions(room.sourceLang, this.targetLang),
+          audio: {
+            input: {
+              format: { type: 'audio/pcm', rate: 24000 },
+              // server_vad para frases largas de reunión:
+              //  - interrupt_response:false → seguir hablando NO cancela la traducción
+              //    en curso (antes se cortaba a mitad de frases largas).
+              //  - silence_duration 1500 → no cierra el turno en pausas cortas dentro
+              //    de una misma oración. Subir si aún corta; bajar para más agilidad.
+              //  - threshold 0.6 → el ruido de fondo no dispara (evita alucinaciones).
+              turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 300, silence_duration_ms: 1500, create_response: true, interrupt_response: false },
+              // Pista fija del idioma del emisor → evita que confunda p. ej. español con portugués.
+              transcription: { model: 'whisper-1', language: room.sourceLang },
+              noise_reduction: { type: 'near_field' },
+            },
+            output: { format: { type: 'audio/pcm', rate: 24000 }, voice: REALTIME_VOICE },
+          },
+        },
+      }));
+      this.ready = true;
+      while (this.audioQueue.length && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: this.audioQueue.shift() }));
+      }
+      this.toListeners({ type: 'ready', lang: this.targetLang });
+    });
+
+    sock.on('message', (raw) => {
+      if (sock !== this.openaiWs) return;
+      let e; try { e = JSON.parse(raw.toString()); } catch { return; }
+
+      // Voz traducida (PCM16 24 kHz) → streaming directo a los oyentes.
+      if (e.type === 'response.output_audio.delta') {
+        this.toListeners({ type: 'audio', chunk: e.delta });
+      }
+      // Subtítulos de la traducción.
+      if (e.type === 'response.output_audio_transcript.delta') {
+        this.outputBuf += e.delta || '';
+        this.toListeners({ type: 'partial', text: this.outputBuf });
+      }
+      if (e.type === 'response.output_audio_transcript.done') {
+        const t = (e.transcript || this.outputBuf || '').trim();
+        this.outputBuf = '';
+        if (t) this.toListeners({ type: 'final', text: t });
+      }
+      // Transcripción del idioma origen → confirmación en pantalla del emisor.
+      if (e.type === 'conversation.item.input_audio_transcription.delta' && this.isPrimary()) {
+        this.inputBuf += e.delta || '';
+        room.sendToBroadcaster({ type: 'source_partial', text: this.inputBuf });
+      }
+      if (e.type === 'conversation.item.input_audio_transcription.completed' && this.isPrimary()) {
+        const t = (e.transcript || '').trim();
+        this.inputBuf = '';
+        if (t) room.sendToBroadcaster({ type: 'source_final', text: t });
+      }
+
+      if (e.type === 'error') {
+        const msg = e.error?.message || 'OpenAI error';
+        console.error(`[Intérprete:${this.targetLang}] Error:`, msg);
+        this.toListeners({ type: 'error', message: msg });
+      }
+    });
+
+    sock.on('error', (err) => console.error(`[Intérprete:${this.targetLang}] WS error:`, err?.message || String(err)));
+    sock.on('close', (code) => {
+      if (sock !== this.openaiWs) return;
+      this.openaiWs = null; this.ready = false;
+      if (code !== 1000 && code !== 1001 && this.listeners.size > 0) {
+        setTimeout(() => { if (this.listeners.size > 0) this.connect(); }, 1000);
+      }
+    });
+  }
+
+  appendAudio(base64) {
+    if (this.ready && this.openaiWs?.readyState === WebSocket.OPEN) {
+      this.openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: base64 }));
+    } else if (this.audioQueue.length < MAX_QUEUED_CHUNKS) {
+      this.audioQueue.push(base64);
+    }
+  }
+
+  // Cambiar el idioma del emisor en caliente (instrucciones + pista de transcripción).
+  updateSourceLang() {
+    if (this.openaiWs?.readyState === WebSocket.OPEN) {
+      this.openaiWs.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          instructions: interpreterInstructions(room.sourceLang, this.targetLang),
+          audio: { input: { transcription: { model: 'whisper-1', language: room.sourceLang } } },
+        },
+      }));
+    }
+  }
+
+  close() {
+    this.openaiWs?.close();
+    this.openaiWs = null;
+  }
+}
+
+// ── Emisor ────────────────────────────────────────────────────────────────────
+broadcastWss.on('connection', (ws) => {
+  if (room.broadcaster && room.broadcaster.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'busy', message: 'Ya hay una transmisión activa.' }));
+    ws.close();
+    return;
+  }
+  room.broadcaster = ws;
+  console.log('[Room] Emisor conectado');
+  ws.send(JSON.stringify({ type: 'broadcaster_ready', listeners: room.listeners.size }));
+
+  ws.on('message', (raw) => {
+    let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.type === 'set_source_lang' && msg.lang) room.setSourceLang(msg.lang);
+    if (msg.type === 'audio_chunk' && msg.audio) room.appendAudio(msg.audio);
+  });
+
+  ws.on('close', () => {
+    if (room.broadcaster === ws) room.broadcaster = null;
+    console.log('[Room] Emisor desconectado');
+    for (const ws2 of room.listeners) {
+      if (ws2.readyState === WebSocket.OPEN) ws2.send(JSON.stringify({ type: 'broadcaster_left' }));
+    }
+  });
+});
+
+// ── Oyentes ─────────────────────────────────────────────────────────────────
+listenWss.on('connection', (ws) => {
+  ws.lang = null;
+  room.listeners.add(ws);
+  ws.send(JSON.stringify({ type: 'connected', broadcasting: !!room.broadcaster }));
+
+  ws.on('message', (raw) => {
+    let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.type === 'set_lang' && msg.lang) {
+      // Salir de la sesión anterior
+      if (ws.lang && room.sessions.has(ws.lang)) {
+        room.sessions.get(ws.lang).listeners.delete(ws);
+        room.removeSessionIfEmpty(ws.lang);
+      }
+      ws.lang = msg.lang;
+      const s = room.ensureSession(msg.lang);
+      s.listeners.add(ws);
+      if (s.ready) ws.send(JSON.stringify({ type: 'ready', lang: msg.lang }));
+    }
+  });
+
+  ws.on('close', () => {
+    room.listeners.delete(ws);
+    if (ws.lang && room.sessions.has(ws.lang)) {
+      room.sessions.get(ws.lang).listeners.delete(ws);
+      room.removeSessionIfEmpty(ws.lang);
+    }
+  });
+});
+
+// ── Ruteo de upgrades WebSocket por ruta ──────────────────────────────────────
+server.on('upgrade', (req, socket, head) => {
+  let pathname;
+  try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { socket.destroy(); return; }
+
+  const route = (wsServer) => wsServer.handleUpgrade(req, socket, head, (ws) => wsServer.emit('connection', ws, req));
+
+  if (pathname === '/ws') route(wss);
+  else if (pathname === '/broadcast') route(broadcastWss);
+  else if (pathname === '/listen') route(listenWss);
+  else socket.destroy();
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`\nTraductorVivo server → ws://localhost:${PORT}/ws\n`);
+  console.log(`\nTraductorVivo server → ws://localhost:${PORT}/ws`);
+  console.log(`Modo transmisión     → ws://localhost:${PORT}/broadcast y /listen (extensión)\n`);
 });
