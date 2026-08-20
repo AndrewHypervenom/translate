@@ -1139,6 +1139,19 @@ app.get(['/sala', '/sala/:code'], (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'sala.html'));
 });
 
+// Datos públicos de una sala, para que la página pueda mostrar solo los
+// idiomas permitidos ANTES de entrar y avisar si el enlace ya no vale. No
+// expone nada sensible: ni quién está dentro, ni el consumo.
+app.get('/api/sala/:code', (req, res) => {
+  const room = rooms.get(normalizeRoomId(req.params.code));
+  if (!room || room.expired) return res.json({ exists: false });
+  res.json({
+    exists: true,
+    langs: room.langs,
+    full: room.peers.size >= room.maxPeers,
+  });
+});
+
 // ── Administración ────────────────────────────────────────────────────────────
 // Solo desde aquí se abren salas. La página /admin es estática; lo que está
 // protegido es la API, que es la que puede gastar dinero.

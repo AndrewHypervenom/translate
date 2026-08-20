@@ -21,8 +21,11 @@ function langName(code) {
   return LANGUAGES.find((l) => l.code === code)?.name || code;
 }
 
-function fillLangSelect(el, selected) {
-  el.innerHTML = LANGUAGES
+// `only` limita las opciones a esos códigos: en una sala solo se ofrecen los
+// idiomas que permitió quien la creó, en vez de la lista entera de 15.
+function fillLangSelect(el, selected, only) {
+  const opciones = only?.length ? LANGUAGES.filter((l) => only.includes(l.code)) : LANGUAGES;
+  el.innerHTML = opciones
     .map((l) => `<option value="${l.code}"${l.code === selected ? ' selected' : ''}>${l.name}</option>`)
     .join('');
 }

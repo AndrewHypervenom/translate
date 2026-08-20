@@ -67,10 +67,8 @@ function shareUrl() {
 
 function refreshShareLink() {
   const url = shareUrl();
-  el.shareLink.textContent = url || 'Escribe un código de sala para generar el enlace';
+  el.shareLink.textContent = url || '—';
   el.copyBtn.disabled = !url;
-  // La barra de direcciones sigue al código, así se puede copiar desde ahí.
-  if (url) history.replaceState(null, '', `/sala/${normalizeRoomId(el.room.value)}`);
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -301,12 +299,8 @@ function handleMessage(msg) {
 // sesión de traducción y multiplica el coste del evento).
 function applyRoomLangs(msg) {
   if (Array.isArray(msg.langs) && msg.langs.length) {
-    const permitidos = LANGUAGES.filter((l) => msg.langs.includes(l.code));
-    for (const [select, valor] of [[el.speakLang, msg.speakLang], [el.listenLang, msg.listenLang]]) {
-      select.innerHTML = permitidos
-        .map((l) => `<option value="${l.code}"${l.code === valor ? ' selected' : ''}>${l.name}</option>`)
-        .join('');
-    }
+    fillLangSelect(el.speakLang, msg.speakLang || el.speakLang.value, msg.langs);
+    fillLangSelect(el.listenLang, msg.listenLang || el.listenLang.value, msg.langs);
   }
   if (msg.speakLang) el.speakLang.value = msg.speakLang;
   if (msg.listenLang) el.listenLang.value = msg.listenLang;
@@ -449,6 +443,32 @@ function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREFS)) || {}; } catch { return {}; }
 }
 
+// Se consultan los datos públicos de la sala antes de entrar, para ofrecer solo
+// los idiomas permitidos (en vez de la lista entera de 15) y avisar cuanto
+// antes si el enlace ya no sirve.
+async function loadRoomInfo(code) {
+  let info;
+  try {
+    info = await (await fetch(`/api/sala/${encodeURIComponent(code)}`)).json();
+  } catch {
+    return; // sin red: se intentará igualmente al pulsar Entrar
+  }
+
+  if (!info.exists) {
+    setStatus('Esta sala no existe o ya se cerró. Pide un enlace nuevo a quien te invitó.', 'err');
+    el.toggle.disabled = true;
+    el.speakLang.disabled = true;
+    el.listenLang.disabled = true;
+    return;
+  }
+  if (info.langs?.length) {
+    const prefs = loadPrefs();
+    fillLangSelect(el.speakLang, prefs.speakLang, info.langs);
+    fillLangSelect(el.listenLang, prefs.listenLang, info.langs);
+  }
+  if (info.full) setStatus('La sala está llena ahora mismo. Inténtalo en un momento.', 'wait');
+}
+
 async function init() {
   // Se comprueba antes de entrar, para poder decírselo al servidor en el 'join'.
   useOpus = await opusSupported();
@@ -459,10 +479,14 @@ async function init() {
   el.name.value = prefs.name || '';
   el.antiEcho.checked = prefs.antiEcho ?? false;
 
-  // El código viene en el enlace compartido: /sala/equipo-ventas
+  // El código SIEMPRE viene del enlace con el que te invitaron; el campo está
+  // bloqueado. Sin código no hay nada que hacer aquí: a la portada.
   const fromPath = decodeURIComponent(location.pathname.replace(/^\/sala\/?/, ''));
-  el.room.value = normalizeRoomId(fromPath);
+  const code = normalizeRoomId(fromPath);
+  if (!code) { location.replace('/'); return; }
+  el.room.value = code;
   refreshShareLink();
+  loadRoomInfo(code);
 
   el.toggle.onclick = () => (active ? leave() : enter());
   el.mic.onclick = () => (hasMic || micPending ? releaseMic() : takeMic());
@@ -479,7 +503,6 @@ async function init() {
     setTimeout(() => { el.copyBtn.textContent = 'Copiar enlace'; }, 1800);
   };
 
-  el.room.oninput = refreshShareLink;
   el.name.onchange = savePrefs;
   el.antiEcho.onchange = savePrefs;
 
