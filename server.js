@@ -128,6 +128,12 @@ const billing = {
   day: new Date().toISOString().slice(0, 10),
   usedMs: 0,
   history: {}, // 'YYYY-MM-DD' -> ms medidos, para comparar con la factura real
+  // Marcador de "empieza a contar desde aquí". La factura de OpenAI no se
+  // puede borrar —ese dinero se gastó—, pero sí se puede descontar lo anterior
+  // para que el panel refleje solo el uso a partir de cierto momento.
+  since: null,        // días anteriores no se muestran
+  sinceAmount: 0,     // ya facturado el día del corte, se resta
+  sinceDay: null,
 
   rollOver() {
     const today = new Date().toISOString().slice(0, 10);
@@ -1255,7 +1261,7 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
 //
 // Ojo: la factura es de TODA la organización. Si usas OpenAI para otras cosas,
 // se desglosa por línea para poder distinguirlas.
-const COSTS_CACHE_MS = 10 * 60 * 1000;
+const COSTS_CACHE_MS = Number(process.env.COSTS_CACHE_MS || 10 * 60 * 1000);
 let costsCache = { at: 0, data: null };
 
 async function fetchOpenAICosts(dias = 8) {
@@ -1316,13 +1322,22 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
   }
 
   // Solo los días con algo que contar: una lista de ceros no informa de nada.
-  const dias = [...new Set([...Object.keys(medidos), ...Object.keys(reales)])].sort().slice(-8);
-  const filas = dias.map((day) => ({
-    day,
-    minutes: +(medidos[day] || 0).toFixed(2),
-    real: reales[day] ? +reales[day].total.toFixed(4) : null,
-    lines: reales[day]?.lineas || {},
-  })).filter((f) => f.minutes > 0 || f.real > 0);
+  // Y nada anterior al corte, si se puso el contador a cero.
+  const dias = [...new Set([...Object.keys(medidos), ...Object.keys(reales)])]
+    .filter((d) => !billing.since || d >= billing.since)
+    .sort().slice(-8);
+
+  const filas = dias.map((day) => {
+    let real = reales[day] ? reales[day].total : null;
+    // El día del corte ya llevaba gasto: se descuenta lo de antes.
+    if (real !== null && day === billing.sinceDay) real = Math.max(0, real - billing.sinceAmount);
+    return {
+      day,
+      minutes: +(medidos[day] || 0).toFixed(2),
+      real: real === null ? null : +real.toFixed(4),
+      lines: reales[day]?.lineas || {},
+    };
+  }).filter((f) => f.minutes > 0 || f.real > 0);
 
   // El precio real se saca de los días ya CERRADOS con consumo: el de hoy aún
   // no está facturado del todo y falsearía la media.
@@ -1339,20 +1354,41 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
     calibratedOn: { days: calibra.length, minutes: +minutosCal.toFixed(1), cost: +costeCal.toFixed(2) },
     todayMinutes: +medidos[hoy].toFixed(2),
     todayEstimate: +(medidos[hoy] * (precioReal || PRICE_PER_MINUTE)).toFixed(3),
+    since: billing.since,
+    discounted: +billing.sinceAmount.toFixed(2),
   });
 });
 
 // Borra el histórico de minutos medidos. Útil cuando arrastra datos que ya no
 // significan nada (los de las pruebas, por ejemplo), que además falsean el
 // cálculo del precio real por minuto.
-app.post('/admin/api/costs/reset', requireAdmin, (_req, res) => {
+app.post('/admin/api/costs/reset', requireAdmin, async (_req, res) => {
   billing.history = {};
   billing.usedMs = 0;
   for (const room of rooms.values()) room.usedMs = 0;
+
+  const hoy = new Date().toISOString().slice(0, 10);
+  billing.since = hoy;
+  billing.sinceDay = hoy;
+  billing.sinceAmount = 0;
+
+  // La factura de OpenAI no se puede borrar: ese dinero se gastó. Lo que se
+  // hace es apuntar cuánto llevaba facturado hoy y descontarlo a partir de
+  // ahora, para que el panel muestre solo lo que venga de aquí en adelante.
+  if (OPENAI_ADMIN_KEY) {
+    try {
+      costsCache = { at: 0, data: null };
+      const reales = await fetchOpenAICosts();
+      billing.sinceAmount = reales[hoy]?.total || 0;
+    } catch (err) {
+      console.warn('[admin] No se pudo leer la factura para el corte:', err.message);
+    }
+  }
+
   costsCache = { at: 0, data: null };
   saveState();
-  console.log('[admin] Histórico de consumo borrado');
-  res.json({ ok: true });
+  console.log(`[admin] Contador a cero desde ${hoy} (descontando $${billing.sinceAmount.toFixed(2)} ya facturados)`);
+  res.json({ ok: true, since: hoy, discounted: +billing.sinceAmount.toFixed(4) });
 });
 
 app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
@@ -1375,7 +1411,10 @@ let saveTimer = null;
 
 function stateSnapshot() {
   return JSON.stringify({
-    billing: { day: billing.day, usedMs: billing.usedMs, history: billing.history },
+    billing: {
+      day: billing.day, usedMs: billing.usedMs, history: billing.history,
+      since: billing.since, sinceDay: billing.sinceDay, sinceAmount: billing.sinceAmount,
+    },
     rooms: [...rooms.values()].map((r) => ({
       id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
       maxPeers: r.maxPeers, maxSpeakers: r.maxSpeakers, langs: r.langs, usedMs: r.usedMs,
@@ -1416,6 +1455,9 @@ function loadState() {
   if (data.billing?.history && typeof data.billing.history === 'object') {
     billing.history = data.billing.history;
   }
+  billing.since = data.billing?.since || null;
+  billing.sinceDay = data.billing?.sinceDay || null;
+  billing.sinceAmount = Number(data.billing?.sinceAmount) || 0;
   if (data.billing?.day === new Date().toISOString().slice(0, 10)) {
     billing.usedMs = Number(data.billing.usedMs) || 0;
   } else if (data.billing?.day) {

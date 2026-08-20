@@ -70,8 +70,16 @@ async function loadCosts() {
       + 'En cuanto haya un día completo facturado, aquí saldrá tu precio real.';
   }
 
+  // Transparencia: si se puso el contador a cero, hay que decir qué se descontó.
+  // Ese dinero se gastó de verdad; solo se está dejando de mostrar.
+  const corte = c.since
+    ? `<div class="muted" style="margin-top:10px">Contando desde el ${esc(c.since)}`
+      + (c.discounted > 0 ? `, descontando ${money(c.discounted)} ya facturados antes del corte` : '')
+      + '. Ese gasto anterior sigue en tu cuenta de OpenAI; aquí solo no se muestra.</div>'
+    : '';
+
   if (!c.days.length) {
-    el('costTable').innerHTML = '<div class="muted">Todavía no hay consumo registrado.</div>';
+    el('costTable').innerHTML = '<div class="muted">Todavía no hay consumo registrado.</div>' + corte;
     return;
   }
 
@@ -91,7 +99,7 @@ async function loadCosts() {
       }).join('')}</tbody>
     </table>
     <div class="muted" style="margin-top:10px">La factura es de toda tu cuenta de OpenAI. El desglose por línea
-      te deja ver qué parte es de la traducción y qué parte de otras cosas tuyas.</div>`;
+      te deja ver qué parte es de la traducción y qué parte de otras cosas tuyas.</div>${corte}`;
 }
 
 // ── Idiomas permitidos ────────────────────────────────────────────────────────
@@ -290,9 +298,12 @@ el('create').onclick = createRoom;
 el('refresh').onclick = refresh;
 el('refreshCosts').onclick = loadCosts;
 el('clearCosts').onclick = async () => {
-  if (!confirm('¿Borrar el histórico de consumo medido? La factura de OpenAI no se toca.')) return;
+  if (!confirm('¿Poner el contador a cero desde ahora?\n\nLo ya facturado por OpenAI no se puede borrar (ese dinero se gastó), pero se descuenta para que el panel muestre solo lo que venga a partir de este momento.')) return;
   try {
-    await api('/costs/reset', { method: 'POST' });
+    const r = await api('/costs/reset', { method: 'POST' });
+    show('ok', r.discounted > 0
+      ? `Contador a cero. Se descuentan ${money(r.discounted)} ya facturados hoy.`
+      : 'Contador a cero.');
     await loadCosts();
     refresh();
   } catch (e) { show('err', esc(e.message)); }
