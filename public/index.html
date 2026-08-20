@@ -2,54 +2,63 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PositivoS+ En Vivo — traducción de voz en tiempo real</title>
-  <meta name="description" content="Crea una sala, comparte el enlace y que cada persona hable y escuche en su propio idioma.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#08080a">
+  <title>PositivoS+ En Vivo</title>
   <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      margin: 0; min-height: 100vh; background: linear-gradient(135deg,#1a1a2e,#2d2d54);
-      color: #fff; padding: 24px; display: flex; align-items: center; justify-content: center; }
-    .wrap { max-width: 560px; width: 100%; text-align: center; }
-    h1 { font-size: 30px; margin: 0 0 10px; }
-    p { color: #b8b8d8; line-height: 1.6; margin: 0 0 28px; }
-    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 16px; padding: 24px; text-align: left; }
-    .label { color: #9a9ac0; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; }
-    input { flex: 1 1 200px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
-      color: #fff; border-radius: 10px; padding: 14px; font-size: 16px; }
-    button { font-size: 15px; font-weight: 600; border: none; border-radius: 10px; padding: 14px 22px;
-      cursor: pointer; background: #4ade80; color: #06301a; }
-    button:hover { filter: brightness(1.08); }
-    .hint { color: #9a9ac0; font-size: 13px; margin-top: 14px; line-height: 1.5; }
-    footer { color: #6c6c92; font-size: 12px; margin-top: 24px; }
-    footer a { color: #8f8fc0; }
+    :root { --bg:#08080a; --fg:#f4f4f5; --muted:#7c7c85; --line:rgba(255,255,255,.09);
+            --surface:rgba(255,255,255,.035); --r:14px; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
+    body { margin:0; background:var(--bg); color:var(--fg); display:grid; place-items:center; padding:24px;
+      font:400 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+      -webkit-font-smoothing:antialiased; }
+    main { width:100%; max-width: 380px; display:flex; flex-direction:column; gap:22px; }
+    h1 { font-size:28px; font-weight:600; letter-spacing:-.02em; margin:0; }
+    p { color:var(--muted); font-size:15px; margin:6px 0 0; }
+    form { display:flex; flex-direction:column; gap:12px; }
+    input { width:100%; background:var(--surface); border:1px solid var(--line); color:var(--fg);
+      border-radius:var(--r); padding:14px 15px; font:inherit; font-size:16px; outline:none;
+      transition:border-color .15s; }
+    input:focus { border-color:rgba(255,255,255,.25); }
+    button { border:none; border-radius:var(--r); padding:16px; cursor:pointer; background:var(--fg);
+      color:#0a0a0c; font:inherit; font-size:16px; font-weight:600; transition:opacity .15s; }
+    button:hover { opacity:.88; }
+    .help { color:var(--muted); font-size:13px; text-align:center; }
+    .lang { position:fixed; top:18px; right:18px; background:none; border:none; color:var(--muted);
+      font:inherit; font-size:13px; padding:7px 11px; border-radius:999px; cursor:pointer; width:auto; }
+    .lang:hover { color:var(--fg); background:var(--surface); opacity:1; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>🗣️ PositivoS+ En Vivo</h1>
-    <p>Habla en tu idioma y que cada persona te escuche en el suyo, en tiempo real. Sin instalar nada.</p>
+  <button class="lang" id="langBtn">🌐 <span id="langCode">ES</span></button>
 
-    <div class="card">
-      <div class="label">Entrar a una sala</div>
-      <form class="row" id="form">
-        <input id="room" type="text" placeholder="código de la sala" maxlength="40" autocomplete="off" required>
-        <button type="submit">Entrar</button>
-      </form>
-      <div class="hint">Necesitas el código o el enlace de una sala que ya esté abierta. Si no tienes uno, pídeselo a quien te invitó.</div>
+  <main>
+    <div>
+      <h1>PositivoS+ En Vivo</h1>
+      <p data-i18n="app.tagline"></p>
     </div>
+    <form id="form">
+      <input id="room" type="text" data-i18n-ph="home.codePh" maxlength="40" autocomplete="off" required>
+      <button type="submit" data-i18n="home.enter"></button>
+    </form>
+    <div class="help" data-i18n="home.help"></div>
+  </main>
 
-    <footer><a href="/privacy">Privacidad</a> · <a href="/admin">Panel</a></footer>
-  </div>
-
+  <script src="/i18n.js"></script>
   <script>
+    setUiLang(detectUiLang());
+    const code = document.getElementById('langCode');
+    code.textContent = uiLang.toUpperCase();
+    document.getElementById('langBtn').onclick = () => {
+      setUiLang(UI_LANGS[(UI_LANGS.indexOf(uiLang) + 1) % UI_LANGS.length]);
+      code.textContent = uiLang.toUpperCase();
+    };
     document.getElementById('form').addEventListener('submit', (e) => {
       e.preventDefault();
-      const code = document.getElementById('room').value
+      const c = document.getElementById('room').value
         .trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
-      if (code) location.href = '/sala/' + code;
+      if (c) location.href = '/sala/' + c;
     });
   </script>
 </body>

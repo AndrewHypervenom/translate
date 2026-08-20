@@ -1,41 +1,43 @@
-// Sala bidireccional pública: cualquiera abre el enlace en su navegador, elige
-// su idioma y escucha. Para hablar hay que pedir la palabra.
+// Sala pública: se abre el enlace, se elige idioma y se escucha. Para hablar
+// hay que pedir turno.
 //
-// Se entra ESCUCHANDO, sin micrófono. En una charla con 50 asistentes, 50
-// micrófonos abiertos serían 50 sesiones de traducción disparadas por toses y
-// conversaciones de fondo: caos para quien escucha y la factura multiplicada.
-// El navegador ni siquiera pide permiso de micrófono hasta que pulsas "Hablar".
+// Se entra ESCUCHANDO, sin micrófono. En una charla con decenas de asistentes,
+// otros tantos micrófonos abiertos serían otras tantas sesiones de traducción
+// disparadas por toses y ruido de fondo: caos y factura multiplicada. El
+// navegador ni siquiera pide permiso hasta que se pulsa "Hablar".
 //
-// El servidor abre una sesión de traducción por cada idioma que escuchen LOS
-// DEMÁS, así que nadie recibe nunca su propia voz de vuelta.
+// El servidor abre una sesión por cada idioma que escuchen LOS DEMÁS, así que
+// nadie recibe nunca su propia voz de vuelta.
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/room`;
-const FRAME_SAMPLES = 1024; // ~43 ms a 24 kHz
-const FRAME_MS = (FRAME_SAMPLES / PCM_SAMPLE_RATE) * 1000;
-const MAX_LINES = 12;
+const FRAME_SAMPLES = 1024;
+const MAX_LINES = 6;
 
 const el = {};
-for (const id of ['dot', 'statusText', 'toggle', 'copyBtn', 'meter', 'name', 'room',
-  'speakLang', 'listenLang', 'peers', 'subs', 'self', 'antiEcho', 'shareLink',
-  'mic', 'micCard', 'micHint']) {
+for (const id of ['dot', 'statusText', 'statusBar', 'name', 'speakLang', 'listenLang',
+  'enterBtn', 'leaveBtn', 'langBtn', 'langCode', 'echoBtn', 'lobby', 'room',
+  'subs', 'mic', 'micLabel', 'meter']) {
   el[id] = document.getElementById(id);
 }
 
+let roomCode = '';
+let roomLangs = [];
 let ws = null;
 let audioCtx = null;
 let micStream = null;
 let processor = null;
 let gate = null;
-let active = false;      // dentro de la sala (escuchando)
-let hasMic = false;      // tenemos la palabra concedida
-let micPending = false;  // la hemos pedido y esperamos respuesta
+let active = false;
+let hasMic = false;
+let micPending = false;
 let myPeerId = null;
-let rejected = false;    // el servidor nos negó la entrada y explicó por qué
-let useOpus = false;     // este navegador sabe descomprimir Opus
+let rejected = false;
+let useOpus = false;
+let antiEcho = false;
 
-const players = new Map();  // peerId -> PCMPlayer (uno por interlocutor)
-const partials = new Map(); // peerId -> texto en curso
-let lines = [];             // subtítulos ya cerrados
+const players = new Map();
+const partials = new Map();
+let lines = [];
 
 // ── Utilidades ────────────────────────────────────────────────────────────────
 
@@ -46,96 +48,49 @@ function esc(s) {
 // Debe coincidir con normalizeRoomId() de server.js.
 function normalizeRoomId(raw) {
   return String(raw || '').trim().toLowerCase()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
-    .slice(0, 40);
+    .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
 }
 
 function setStatus(text, cls = '') {
-  el.statusText.textContent = text;
+  el.statusText.textContent = text || '';
   el.dot.className = 'dot' + (cls ? ' ' + cls : '');
+  el.statusBar.classList.toggle('alert', cls === 'err');
+  el.statusBar.style.visibility = text ? 'visible' : 'hidden';
 }
 
 function send(data) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
 }
 
-function shareUrl() {
-  const code = normalizeRoomId(el.room.value);
-  return code ? `${location.origin}/sala/${code}` : '';
-}
-
-function refreshShareLink() {
-  const url = shareUrl();
-  el.shareLink.textContent = url || '—';
-  el.copyBtn.disabled = !url;
-}
-
-// ── Render ────────────────────────────────────────────────────────────────────
-
-function renderPeers(peers, compact) {
-  // En salas grandes el servidor manda solo el recuento y quién habla: mandar
-  // 150 nombres a 150 personas cada vez que entra alguien es tráfico al
-  // cuadrado, y esa lista tampoco le sirve a nadie.
-  if (compact) {
-    const talking = compact.speaking || [];
-    el.peers.innerHTML =
-      `<span class="peer">${compact.count} personas en la sala</span>` +
-      talking.map((p) => `<span class="peer talking">🎙️ ${esc(p.name)}</span>`).join('');
-    if (!hasMic && !micPending) {
-      el.micHint.innerHTML = talking.length
-        ? `Hablando ahora: <b>${talking.map((p) => esc(p.name)).join(', ')}</b>.`
-        : 'Estás escuchando. Pulsa <b>Hablar</b> cuando quieras preguntar.';
-    }
-    return;
-  }
-
-  if (!peers.length) {
-    el.peers.innerHTML = '<span class="hint">Nadie todavía.</span>';
-    return;
-  }
-  el.peers.innerHTML = peers
-    .map((p) => {
-      const me = p.id === myPeerId;
-      const cls = 'peer' + (me ? ' me' : '') + (p.hasMic ? ' talking' : '');
-      return `<span class="${cls}">${p.hasMic ? '🎙️ ' : ''}${esc(p.name)}${me ? ' (tú)' : ''}
-        <span class="langs">· habla ${esc(langName(p.speakLang))} · oye ${esc(langName(p.listenLang))}</span></span>`;
-    })
-    .join('');
-
-  const talking = peers.filter((p) => p.hasMic);
-  if (!hasMic && !micPending) {
-    el.micHint.innerHTML = talking.length
-      ? `Hablando ahora: <b>${talking.map((p) => esc(p.name)).join(', ')}</b>.`
-      : 'Entras escuchando, con el micrófono apagado. Pulsa <b>Hablar</b> cuando quieras preguntar y vuelve a pulsarlo al terminar.';
-  }
-}
+// ── Subtítulos ────────────────────────────────────────────────────────────────
 
 function renderSubs() {
-  el.subs.innerHTML = [
-    ...lines.map((l) => `<div class="line"><span class="who">${esc(l.name)}</span>${esc(l.text)}</div>`),
-    ...[...partials.values()].map(
-      (p) => `<div class="line"><span class="who">${esc(p.name)}</span><span class="partial">${esc(p.text)}</span></div>`
-    ),
-  ].join('');
+  const items = [
+    ...lines.map((l, i) => ({ ...l, cls: i < lines.length - 2 ? 'old' : '' })),
+    ...[...partials.values()].map((p) => ({ ...p, cls: 'live' })),
+  ];
+
+  if (!items.length) {
+    el.subs.innerHTML = `<div class="empty">${esc(t('room.waiting'))}</div>`;
+    return;
+  }
+  el.subs.innerHTML = items.map((l) => `
+    <div class="line ${l.cls}">
+      <span class="who">${esc(l.name)}</span>
+      <div class="text">${esc(l.text)}</div>
+    </div>`).join('');
   el.subs.scrollTop = el.subs.scrollHeight;
 }
 
-function renderMicButton() {
-  el.mic.disabled = micPending;
-  if (hasMic) {
-    el.mic.textContent = '🔴 Estás hablando — pulsa para callar';
-    el.mic.className = 'mic-on';
-  } else {
-    el.mic.textContent = micPending ? '⏳ Pidiendo la palabra…' : '🎙️ Hablar';
-    el.mic.className = 'mic-off';
-  }
+function renderPeople(count, speaking) {
+  if (hasMic || micPending) return; // el estado del micro manda sobre el resto
+  const gente = count === 1 ? t('room.person') : t('room.people', { n: count });
+  const quien = speaking?.length ? ` · ${t('room.nowSpeaking', { name: speaking[0].name })}` : '';
+  setStatus(gente + quien, 'live');
 }
 
 // ── Reproducción ──────────────────────────────────────────────────────────────
 
-// Un reproductor por interlocutor y por códec: el servidor manda Opus si este
-// navegador sabe descomprimirlo, y PCM si no.
 function playerFor(peerId, codec) {
   if (!audioCtx) return null;
   const key = `${peerId}:${codec}`;
@@ -149,8 +104,6 @@ function playerFor(peerId, codec) {
   return player;
 }
 
-// Si el descompresor falla en marcha, se pide al servidor volver a PCM: se
-// gasta más ancho de banda, pero la persona sigue oyendo.
 function fallBackToPcm() {
   if (!useOpus) return;
   useOpus = false;
@@ -160,76 +113,59 @@ function fallBackToPcm() {
   send({ type: 'set_codec', codec: 'pcm' });
 }
 
-// ¿Está sonando ahora mismo la traducción de alguien?
 function remoteAudioPending() {
-  for (const player of players.values()) {
-    if (player.pendingMs() > 60) return true;
-  }
+  for (const player of players.values()) if (player.pendingMs() > 60) return true;
   return false;
 }
 
-// ── Entrar a la sala (solo escuchar) ──────────────────────────────────────────
+// ── Entrar ────────────────────────────────────────────────────────────────────
 
 async function enter() {
-  const roomId = normalizeRoomId(el.room.value);
-  if (!roomId) {
-    setStatus('Escribe un código de sala para entrar', 'err');
-    el.room.focus();
-    return;
-  }
-  el.room.value = roomId;
-  refreshShareLink();
-  rejected = false;
+  el.enterBtn.disabled = true;
+  el.enterBtn.textContent = t('lobby.entering');
 
-  // Solo para reproducir. El micrófono se pide al pulsar "Hablar", así los
-  // asistentes que únicamente escuchan no ven ni el aviso de permiso.
   audioCtx = createAudioContext();
   await audioCtx.resume().catch(() => {});
 
   active = true;
-  el.toggle.textContent = '■ Salir de la sala';
-  el.toggle.className = 'stop';
-  el.micCard.style.display = 'block';
-  renderMicButton();
-  openSocket(roomId);
+  el.lobby.style.display = 'none';
+  el.room.style.display = 'flex';
+  el.leaveBtn.hidden = false;
+  el.echoBtn.hidden = false;
+  renderSubs();
+  renderMic();
+  openSocket(roomCode);
 }
 
 // `retomarMic`: si al caerse la conexión estábamos hablando, se vuelve a pedir
-// la palabra al reconectar para no dejar a alguien con el botón en rojo y el
-// micrófono mudo.
-function openSocket(roomId, retomarMic = false) {
-  ws = new WebSocket(`${WS_URL}?room=${encodeURIComponent(roomId)}`);
-
-  // Si la conexión ni siquiera llega a abrirse, el navegador puede tardar mucho
-  // en avisar (o no avisar). Sin esto la persona se queda mirando "Sin conectar"
-  // sin saber que su red le está bloqueando el WebSocket.
+// turno al reconectar para no dejar a nadie con el botón en rojo y mudo.
+function openSocket(code, retomarMic = false) {
+  ws = new WebSocket(`${WS_URL}?room=${encodeURIComponent(code)}`);
   const socket = ws;
+
+  // Si la conexión ni llega a abrirse, el navegador puede tardar mucho en
+  // avisar. Sin esto la persona se queda mirando una pantalla muda.
   const abreTarde = setTimeout(() => {
-    if (socket.readyState === WebSocket.CONNECTING) {
-      setStatus('No se consigue abrir la conexión. Suele ser una red que bloquea WebSockets: prueba con otra wifi o con los datos del móvil.', 'err');
-    }
+    if (socket.readyState === WebSocket.CONNECTING) setStatus(t('net.blocked'), 'err');
   }, 12000);
 
   ws.onopen = () => {
     clearTimeout(abreTarde);
-    setStatus('Conectando a la sala…', 'wait');
+    setStatus(t('net.connecting'), 'wait');
     send({
       type: 'join',
-      room: roomId,
-      name: el.name.value.trim() || 'Invitado',
+      room: code,
+      name: el.name.value.trim() || t('room.you'),
       speakLang: el.speakLang.value,
       listenLang: el.listenLang.value,
-      codecs: useOpus ? ['opus'] : [], // sin WebCodecs el servidor manda PCM
+      codecs: useOpus ? ['opus'] : [],
     });
     if (retomarMic) send({ type: 'request_mic' });
   };
   ws.onclose = () => {
     clearTimeout(abreTarde);
-    // Si el servidor nos rechazó (sala inexistente, llena o caducada) ya mandó
-    // el motivo antes de cerrar: no lo pisamos con un "conexión perdida".
     if (!active) return;
     if (rejected) { leave({ keepStatus: true }); return; }
-    // Una caída de red no debería obligar a nadie a volver a entrar a mano.
     scheduleRejoin();
   };
   ws.onmessage = ({ data }) => {
@@ -239,9 +175,9 @@ function openSocket(roomId, retomarMic = false) {
   };
 }
 
-// Reconexión automática. Las caídas pasan (el móvil cambia de wifi a datos, el
-// proxy corta una conexión callada, el servidor se reinicia) y antes había que
-// volver a entrar a mano, que es justo lo que nadie hace en mitad de una charla.
+// Reconexión automática: las caídas pasan (el móvil cambia de wifi a datos, un
+// proxy corta una conexión callada) y nadie va a volver a entrar a mano en
+// mitad de una charla.
 let rejoinTimer = null;
 let rejoinAttempts = 0;
 
@@ -249,14 +185,13 @@ function scheduleRejoin() {
   if (rejoinTimer || !active) return;
   const delay = Math.min(1000 * 2 ** rejoinAttempts, 10000);
   rejoinAttempts++;
-  setStatus(`Conexión perdida — reconectando…`, 'wait');
+  setStatus(t('net.lost'), 'wait');
   rejoinTimer = setTimeout(() => {
     rejoinTimer = null;
     if (!active) return;
     const teniaMic = hasMic;
-    hasMic = false;
-    micPending = false;
-    openSocket(normalizeRoomId(el.room.value), teniaMic);
+    hasMic = false; micPending = false;
+    openSocket(roomCode, teniaMic);
   }, delay);
 }
 
@@ -264,20 +199,14 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'joined':
       myPeerId = msg.peerId;
-      rejoinAttempts = 0; // reconectó bien: el backoff vuelve a empezar
+      rejoinAttempts = 0;
       applyRoomLangs(msg);
-      setStatus(`En la sala "${msg.room}" — estás escuchando`, 'live');
-      renderPeers(msg.peers);
+      renderPeople(msg.peers?.length || 1, msg.peers?.filter((p) => p.hasMic));
       break;
 
     case 'peers':
-      renderPeers(msg.peers, msg.count !== undefined ? msg : null);
-      break;
-
-    // El servidor ajustó nuestros idiomas a los permitidos en la sala.
-    case 'langs_set':
-      el.speakLang.value = msg.speakLang;
-      el.listenLang.value = msg.listenLang;
+      renderPeople(msg.count ?? msg.peers?.length ?? 1,
+        msg.speaking ?? msg.peers?.filter((p) => p.hasMic));
       break;
 
     case 'audio':
@@ -296,54 +225,46 @@ function handleMessage(msg) {
       renderSubs();
       break;
 
-    case 'self_partial':
-    case 'self_final':
-      el.self.textContent = msg.text || '—';
+    case 'langs_set':
+      el.speakLang.value = msg.speakLang;
+      el.listenLang.value = msg.listenLang;
       break;
 
     case 'mic_granted':
-      micPending = false;
-      hasMic = true;
-      renderMicButton();
-      el.micHint.textContent = 'Tienes la palabra: habla normal. Pulsa el botón al terminar para dejar el turno libre.';
-      setStatus('🎙️ Estás hablando', 'live');
+      micPending = false; hasMic = true;
+      renderMic();
+      setStatus(t('room.talking'), 'live');
       break;
 
     case 'mic_denied':
-      micPending = false;
-      stopCapture();
-      renderMicButton();
-      el.micHint.textContent = msg.message;
+      micPending = false; stopCapture(); renderMic();
+      setStatus(tServer(msg), 'wait');
       break;
 
     case 'mic_released':
-      // El servidor nos quitó la palabra (p. ej. por estar callados mucho rato).
-      hasMic = false;
-      micPending = false;
-      stopCapture();
-      renderMicButton();
-      if (msg.message) el.micHint.textContent = `Se soltó tu micrófono: ${msg.message}.`;
-      setStatus('En la sala — estás escuchando', 'live');
+      hasMic = false; micPending = false; stopCapture(); renderMic();
+      setStatus(tServer(msg), 'wait');
       break;
 
     case 'notice':
-      setStatus(msg.message, 'wait');
+      setStatus(tServer(msg), 'wait');
       break;
 
     case 'error':
-      if (!myPeerId) rejected = true; // nos rechazó antes de dejarnos entrar
-      setStatus(msg.message, 'err');
+      if (!myPeerId) rejected = true;
+      setStatus(tServer(msg), 'err');
       break;
   }
 }
 
 // La sala puede venir con los idiomas fijados por quien la creó: se recortan
 // los selectores para que nadie elija uno de más (cada idioma extra es otra
-// sesión de traducción y multiplica el coste del evento).
+// sesión de traducción y multiplica el coste).
 function applyRoomLangs(msg) {
   if (Array.isArray(msg.langs) && msg.langs.length) {
-    fillLangSelect(el.speakLang, msg.speakLang || el.speakLang.value, msg.langs);
-    fillLangSelect(el.listenLang, msg.listenLang || el.listenLang.value, msg.langs);
+    roomLangs = msg.langs;
+    fillLangSelect(el.speakLang, msg.speakLang || el.speakLang.value, roomLangs);
+    fillLangSelect(el.listenLang, msg.listenLang || el.listenLang.value, roomLangs);
   }
   if (msg.speakLang) el.speakLang.value = msg.speakLang;
   if (msg.listenLang) el.listenLang.value = msg.listenLang;
@@ -351,10 +272,18 @@ function applyRoomLangs(msg) {
 
 // ── Micrófono ─────────────────────────────────────────────────────────────────
 
+function renderMic() {
+  el.mic.disabled = micPending;
+  el.mic.className = hasMic ? 'on' : '';
+  el.mic.textContent = hasMic ? '⏹' : '🎙️';
+  el.micLabel.textContent = micPending ? t('room.requesting')
+    : hasMic ? t('room.talking') : t('room.talk');
+}
+
 async function takeMic() {
   if (hasMic || micPending) return;
   micPending = true;
-  renderMicButton();
+  renderMic();
 
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
@@ -362,9 +291,8 @@ async function takeMic() {
       video: false,
     });
   } catch (err) {
-    micPending = false;
-    renderMicButton();
-    el.micHint.textContent = 'No se pudo acceder al micrófono: ' + err.message;
+    micPending = false; renderMic();
+    setStatus(`${t('mic.denied')}: ${err.message}`, 'err');
     return;
   }
 
@@ -376,11 +304,9 @@ async function takeMic() {
   processor.connect(mute);
   mute.connect(audioCtx.destination);
 
-  // El AudioContext puede no estar a 24 kHz si el equipo no lo admitía, así que
-  // la duración real de cada frame depende de su frecuencia.
+  // El AudioContext puede no estar a 24 kHz si el equipo no lo admitía.
   gate = new VoiceGate({ frameMs: (FRAME_SAMPLES / audioCtx.sampleRate) * 1000 });
   processor.onaudioprocess = onAudioFrame;
-
   send({ type: 'request_mic' });
 }
 
@@ -390,33 +316,29 @@ function stopCapture() {
   micStream?.getTracks().forEach((t) => t.stop()); // apaga el piloto de grabación
   micStream = null;
   gate = null;
-  el.meter.style.width = '0%';
+  el.meter.style.width = '0';
 }
 
 function releaseMic() {
   if (!hasMic && !micPending) return;
-  if (hasMic && gate?.open) send({ type: 'speech_end' }); // cierra la última frase
-  hasMic = false;
-  micPending = false;
+  if (hasMic && gate?.open) send({ type: 'speech_end' });
+  hasMic = false; micPending = false;
   stopCapture();
   send({ type: 'release_mic' });
-  renderMicButton();
-  setStatus('En la sala — estás escuchando', 'live');
+  renderMic();
+  setStatus('', '');
 }
 
 // Si el micrófono capta sonido pero el detector de voz no lo deja pasar, la
-// persona habla y no sale nada — y desde su lado no hay forma de saberlo. Se
-// avisa en vez de dejarla a ciegas.
+// persona habla y no sale nada, sin forma de saber por qué. Se avisa.
 let framesConSonido = 0;
 let framesEnviados = 0;
 
 function watchMicHealth(level, seEnvio) {
   if (level > 0.01) framesConSonido++;
   if (seEnvio) framesEnviados++;
-
-  // ~5 s de sonido sin que nada llegue a enviarse.
   if (framesConSonido > 120 && framesEnviados === 0) {
-    el.micHint.textContent = 'Te capto sonido pero no reconozco voz. Acércate al micrófono, sube su volumen en el sistema o prueba con otro.';
+    setStatus(t('mic.noVoice'), 'wait');
     framesConSonido = 0;
   }
   if (framesEnviados > 0) { framesConSonido = 0; framesEnviados = 0; }
@@ -424,14 +346,12 @@ function watchMicHealth(level, seEnvio) {
 
 function onAudioFrame(e) {
   const f32 = e.inputBuffer.getChannelData(0);
-  if (!hasMic) return; // pedida pero aún no concedida: no se manda nada
+  if (!hasMic) return;
 
-  // Con altavoces, el micrófono recaptura la traducción y se realimenta. Para
-  // evitarlo no se ABRE el micrófono mientras suena la voz de otra persona (si
-  // ya estabas hablando, sigues; no te corta a mitad de frase). Con auriculares
-  // no hace falta, y desactivarlo da doble vía real: puedes interrumpir.
-  if (el.antiEcho.checked && remoteAudioPending() && !gate.open) {
-    el.meter.style.width = '0%';
+  // Con altavoces el micrófono recaptura la traducción y se realimenta: no se
+  // ABRE mientras suena otra voz. Si ya estabas hablando, sigues.
+  if (antiEcho && remoteAudioPending() && !gate.open) {
+    el.meter.style.width = '0';
     return;
   }
 
@@ -441,8 +361,6 @@ function onAudioFrame(e) {
 
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (started) send({ type: 'speech_start' });
-  // El modelo solo entiende 24 kHz: si el equipo captura a otra frecuencia hay
-  // que convertirlo o se oiría a otra velocidad.
   const rate = audioCtx.sampleRate;
   for (const frame of frames) {
     send({ type: 'audio_chunk', audio: frameToBase64(resampleTo24k(frame, rate)) });
@@ -452,12 +370,8 @@ function onAudioFrame(e) {
 
 // ── Salir ─────────────────────────────────────────────────────────────────────
 
-// keepStatus: el servidor ya explicó por qué nos echó (sala inexistente, llena,
-// caducada…) y ese motivo no se debe pisar con un "Fuera de la sala" genérico.
 function leave({ keepStatus = false } = {}) {
-  active = false;
-  hasMic = false;
-  micPending = false;
+  active = false; hasMic = false; micPending = false;
   if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
   rejoinAttempts = 0;
   stopCapture();
@@ -469,14 +383,17 @@ function leave({ keepStatus = false } = {}) {
   if (ws) { ws.close(); ws = null; }
 
   partials.clear();
-  el.micCard.style.display = 'none';
-  el.toggle.textContent = '🎧 Entrar';
-  el.toggle.className = '';
-  if (!keepStatus) setStatus('Fuera de la sala', '');
-  renderPeers([]);
+  lines = [];
+  el.room.style.display = 'none';
+  el.lobby.style.display = 'flex';
+  el.leaveBtn.hidden = true;
+  el.echoBtn.hidden = true;
+  el.enterBtn.disabled = false;
+  el.enterBtn.textContent = t('lobby.enter');
+  if (!keepStatus) setStatus('', '');
 }
 
-// ── Preferencias (en este navegador) ──────────────────────────────────────────
+// ── Preferencias ──────────────────────────────────────────────────────────────
 
 const PREFS = 'positivos-sala';
 
@@ -486,90 +403,89 @@ function savePrefs() {
       name: el.name.value.trim(),
       speakLang: el.speakLang.value,
       listenLang: el.listenLang.value,
-      antiEcho: el.antiEcho.checked,
+      antiEcho,
     }));
-  } catch { /* modo incógnito o almacenamiento bloqueado */ }
+  } catch { /* incógnito */ }
 }
 
 function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREFS)) || {}; } catch { return {}; }
 }
 
-// Se consultan los datos públicos de la sala antes de entrar, para ofrecer solo
-// los idiomas permitidos (en vez de la lista entera de 15) y avisar cuanto
-// antes si el enlace ya no sirve.
-async function loadRoomInfo(code) {
+// ── Arranque ──────────────────────────────────────────────────────────────────
+
+// Se consultan los datos públicos de la sala antes de entrar: así los
+// selectores solo ofrecen los idiomas permitidos y se avisa cuanto antes si el
+// enlace ya no sirve.
+async function loadRoomInfo(code, prefs) {
   let info;
   try {
     info = await (await fetch(`/api/sala/${encodeURIComponent(code)}`)).json();
   } catch {
-    return; // sin red: se intentará igualmente al pulsar Entrar
+    return;
   }
-
   if (!info.exists) {
-    setStatus('Esta sala no existe o ya se cerró. Pide un enlace nuevo a quien te invitó.', 'err');
-    el.toggle.disabled = true;
-    el.speakLang.disabled = true;
-    el.listenLang.disabled = true;
+    setStatus(t('server.room_not_found'), 'err');
+    el.enterBtn.disabled = true;
     return;
   }
   if (info.langs?.length) {
-    const prefs = loadPrefs();
-    fillLangSelect(el.speakLang, prefs.speakLang, info.langs);
-    fillLangSelect(el.listenLang, prefs.listenLang, info.langs);
+    roomLangs = info.langs;
+    // El idioma de la interfaz es la mejor pista de qué quiere oír la persona:
+    // quien abre el enlace desde Brasil no debería tener que tocar nada.
+    const porDefecto = roomLangs.includes(uiLang) ? uiLang : roomLangs[0];
+    fillLangSelect(el.speakLang, prefs.speakLang && roomLangs.includes(prefs.speakLang) ? prefs.speakLang : porDefecto, roomLangs);
+    fillLangSelect(el.listenLang, prefs.listenLang && roomLangs.includes(prefs.listenLang) ? prefs.listenLang : porDefecto, roomLangs);
   }
-  if (info.full) setStatus('La sala está llena ahora mismo. Inténtalo en un momento.', 'wait');
+  if (info.full) setStatus(t('server.room_full'), 'wait');
+}
+
+function cycleUiLang() {
+  setUiLang(UI_LANGS[(UI_LANGS.indexOf(uiLang) + 1) % UI_LANGS.length]);
+  el.langCode.textContent = uiLang.toUpperCase();
+  renderMic();
+  if (active) renderSubs();
 }
 
 async function init() {
-  // Se comprueba antes de entrar, para poder decírselo al servidor en el 'join'.
+  setUiLang(detectUiLang());
+  el.langCode.textContent = uiLang.toUpperCase();
   useOpus = await opusSupported();
 
   const prefs = loadPrefs();
-  fillLangSelect(el.speakLang, prefs.speakLang || 'es');
-  fillLangSelect(el.listenLang, prefs.listenLang || 'es');
+  const porDefecto = UI_LANGS.includes(uiLang) ? uiLang : 'es';
+  fillLangSelect(el.speakLang, prefs.speakLang || porDefecto);
+  fillLangSelect(el.listenLang, prefs.listenLang || porDefecto);
   el.name.value = prefs.name || '';
-  el.antiEcho.checked = prefs.antiEcho ?? false;
+  antiEcho = prefs.antiEcho ?? false;
+  el.echoBtn.classList.toggle('on', antiEcho);
+  el.echoBtn.textContent = antiEcho ? '🔈' : '🎧';
+  setStatus('', '');
 
-  // El código SIEMPRE viene del enlace con el que te invitaron; el campo está
-  // bloqueado. Sin código no hay nada que hacer aquí: a la portada.
-  const fromPath = decodeURIComponent(location.pathname.replace(/^\/sala\/?/, ''));
-  const code = normalizeRoomId(fromPath);
-  if (!code) { location.replace('/'); return; }
-  el.room.value = code;
-  refreshShareLink();
-  loadRoomInfo(code);
+  // El código SIEMPRE viene del enlace; no se puede escribir a mano.
+  roomCode = normalizeRoomId(decodeURIComponent(location.pathname.replace(/^\/sala\/?/, '')));
+  if (!roomCode) { location.replace('/'); return; }
+  loadRoomInfo(roomCode, prefs);
 
   // enter() es asíncrono: sin este catch, cualquier fallo dentro (por ejemplo
-  // que el equipo no admita el AudioContext) rechazaba la promesa en silencio y
-  // la persona pulsaba "Entrar" sin que pasara absolutamente nada.
-  el.toggle.onclick = () => {
-    if (active) { leave(); return; }
-    enter().catch((err) => {
-      console.error(err);
-      setStatus('No se pudo entrar: ' + (err?.message || err), 'err');
-      leave({ keepStatus: true });
-    });
-  };
+  // que el equipo no admita el AudioContext) se perdía en silencio y la persona
+  // pulsaba sin que pasara nada.
+  el.enterBtn.onclick = () => enter().catch((err) => {
+    console.error(err);
+    setStatus(`${t('net.failed')}: ${err?.message || err}`, 'err');
+    leave({ keepStatus: true });
+  });
+  el.leaveBtn.onclick = () => leave();
   el.mic.onclick = () => (hasMic || micPending ? releaseMic() : takeMic());
-
-  el.copyBtn.onclick = async () => {
-    const url = shareUrl();
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-      el.copyBtn.textContent = '¡Copiado!';
-    } catch {
-      el.copyBtn.textContent = 'Copia el enlace de arriba';
-    }
-    setTimeout(() => { el.copyBtn.textContent = 'Copiar enlace'; }, 1800);
+  el.langBtn.onclick = cycleUiLang;
+  el.echoBtn.onclick = () => {
+    antiEcho = !antiEcho;
+    el.echoBtn.classList.toggle('on', antiEcho);
+    el.echoBtn.textContent = antiEcho ? '🔈' : '🎧';
+    savePrefs();
   };
 
   el.name.onchange = savePrefs;
-  el.antiEcho.onchange = savePrefs;
-
-  // Cambiar idiomas en caliente: el servidor reajusta las sesiones en la
-  // siguiente frase que hable cada quien.
   for (const select of [el.speakLang, el.listenLang]) {
     select.onchange = () => {
       savePrefs();

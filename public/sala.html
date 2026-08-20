@@ -2,134 +2,185 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sala de conversación — PositivoS+ En Vivo</title>
-  <meta name="description" content="Habla en tu idioma y que cada persona te escuche en el suyo, en tiempo real. Sin instalar nada.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#08080a">
+  <title>PositivoS+ En Vivo</title>
   <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      margin: 0; min-height: 100vh; background: linear-gradient(135deg,#1a1a2e,#2d2d54);
-      color: #fff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
-    .wrap { max-width: 720px; width: 100%; }
-    h1 { font-size: 24px; margin: 4px 0; }
-    p.sub { color: #b8b8d8; margin: 6px 0 20px; line-height: 1.55; font-size: 15px; }
-    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 16px; padding: 20px; margin-bottom: 14px; }
-    .label { color: #9a9ac0; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
-    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .col { flex: 1 1 200px; min-width: 160px; }
-    input, select { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
-      color: #fff; border-radius: 10px; padding: 13px; font-size: 16px; }
-    select option { color: #000; }
-    input[readonly] { background: rgba(0,0,0,.45); color: #8fd6ff; cursor: default;
-      border-style: dashed; font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .5px; }
-    select:disabled, button:disabled { opacity: .55; cursor: not-allowed; }
-    button { font-size: 15px; font-weight: 600; border: none; border-radius: 10px; padding: 13px 20px;
-      cursor: pointer; background: #4ade80; color: #06301a; }
-    button:hover { filter: brightness(1.08); }
-    button.stop { background: #f87171; color: #3b0a0a; }
-    button.ghost { background: rgba(255,255,255,0.12); color: #fff; font-weight: 500; font-size: 13px; padding: 11px 14px; }
-    .status { display: flex; align-items: center; gap: 10px; font-size: 15px; margin-top: 14px; line-height: 1.4; }
-    .dot { width: 12px; height: 12px; border-radius: 50%; background: #666; flex: none; }
-    .dot.live { background: #4ade80; animation: pulse 1.2s infinite; }
-    .dot.wait { background: #facc15; }
-    .dot.err  { background: #f87171; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-    .meter { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: 12px; }
-    .meter > div { height: 100%; width: 0%; background: #4ade80; transition: width .08s linear; }
-    .share { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
-    .share code { flex: 1 1 240px; background: rgba(0,0,0,.35); padding: 11px 12px; border-radius: 8px;
-      font-size: 13px; overflow-x: auto; white-space: nowrap; color: #8fd6ff; }
-    .peers { display: flex; flex-wrap: wrap; gap: 8px; }
-    .peer { background: rgba(255,255,255,0.09); border-radius: 999px; padding: 6px 14px; font-size: 13px; }
-    .peer .langs { color: #9a9ac0; }
-    .peer.me { background: rgba(74,222,128,0.18); }
-    .peer.talking { background: rgba(139,190,255,.22); box-shadow: 0 0 0 1px rgba(139,190,255,.4) inset; }
-    #mic { width: 100%; padding: 20px; font-size: 18px; }
-    #mic.mic-off { background: rgba(255,255,255,0.14); color: #fff; }
-    #mic.mic-off:hover { background: rgba(255,255,255,0.2); }
-    #mic.mic-on { background: #f87171; color: #3b0a0a; animation: pulse 1.6s infinite; }
-    #mic:disabled { opacity: .5; cursor: not-allowed; animation: none; }
-    .subs { min-height: 140px; max-height: 300px; overflow-y: auto; font-size: 19px; line-height: 1.5; }
-    .subs .line { margin-bottom: 12px; }
-    .subs .who { display: block; font-size: 12px; color: #8fd6ff; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px; }
-    .subs .partial { color: #c8c8e8; }
-    .self { color: #b8b8d8; font-size: 15px; min-height: 22px; }
-    .hint { color: #9a9ac0; font-size: 13px; margin-top: 10px; line-height: 1.5; }
-    footer { color: #6c6c92; font-size: 12px; text-align: center; margin: 8px 0 24px; }
-    footer a { color: #8f8fc0; }
+    :root {
+      --bg: #08080a;
+      --fg: #f4f4f5;
+      --muted: #7c7c85;
+      --line: rgba(255,255,255,.09);
+      --surface: rgba(255,255,255,.035);
+      --accent: #34d399;
+      --danger: #f87171;
+      --r: 14px;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 400 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      display: flex; flex-direction: column;
+      padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+    }
+
+    /* ── Barra superior, casi invisible ── */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      max-width: 620px; width: 100%; margin: 0 auto 8px; flex: none;
+    }
+    .brand { font-size: 13px; letter-spacing: .01em; color: var(--muted); }
+    .brand b { color: var(--fg); font-weight: 600; }
+    .top-actions { display: flex; align-items: center; gap: 6px; }
+
+    .icon-btn {
+      appearance: none; background: none; border: 1px solid transparent; color: var(--muted);
+      font: inherit; font-size: 13px; padding: 7px 11px; border-radius: 999px; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 6px; transition: color .15s, background .15s;
+    }
+    .icon-btn:hover { color: var(--fg); background: var(--surface); }
+    .icon-btn.on { color: var(--accent); }
+
+    main { flex: 1; display: flex; flex-direction: column; max-width: 620px; width: 100%; margin: 0 auto; min-height: 0; }
+
+    /* ── Antesala ── */
+    #lobby { margin: auto 0; display: flex; flex-direction: column; gap: 22px; padding-bottom: 8vh; }
+    .title { font-size: 28px; font-weight: 600; letter-spacing: -.02em; margin: 0; }
+    .subtitle { color: var(--muted); font-size: 15px; margin: 6px 0 0; }
+    .field { display: flex; flex-direction: column; gap: 8px; }
+    .field > span { font-size: 12px; color: var(--muted); letter-spacing: .02em; }
+    .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    input, select {
+      width: 100%; background: var(--surface); border: 1px solid var(--line); color: var(--fg);
+      border-radius: var(--r); padding: 14px 15px; font: inherit; font-size: 16px;
+      outline: none; transition: border-color .15s;
+    }
+    input:focus, select:focus { border-color: rgba(255,255,255,.25); }
+    select { appearance: none; cursor: pointer;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
+      background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+    select option { background: #16161a; color: var(--fg); }
+    .primary {
+      width: 100%; border: none; border-radius: var(--r); padding: 16px; cursor: pointer;
+      background: var(--fg); color: #0a0a0c; font: inherit; font-size: 16px; font-weight: 600;
+      transition: opacity .15s, transform .06s;
+    }
+    .primary:hover { opacity: .88; }
+    .primary:active { transform: scale(.99); }
+    .primary:disabled { opacity: .35; cursor: not-allowed; }
+
+    /* ── Sala ── */
+    #room { display: none; flex: 1; flex-direction: column; min-height: 0; }
+
+    #subs {
+      flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
+      justify-content: flex-end; gap: 18px; padding: 12px 2px 26px;
+      -webkit-mask-image: linear-gradient(180deg, transparent, #000 44px);
+              mask-image: linear-gradient(180deg, transparent, #000 44px);
+    }
+    #subs::-webkit-scrollbar { width: 0; }
+    .line { animation: rise .28s ease-out; }
+    .line .who { display: block; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 5px; }
+    .line .text { font-size: 21px; line-height: 1.42; letter-spacing: -.01em; }
+    .line.live .text { color: #c9c9d1; }
+    .line.old { opacity: .38; }
+    @keyframes rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+    .empty { color: var(--muted); font-size: 15px; text-align: center; margin: auto 0; }
+
+    /* ── Control de voz ── */
+    .console { flex: none; display: flex; flex-direction: column; align-items: center; gap: 12px; padding-top: 4px; }
+    #mic {
+      position: relative; width: 78px; height: 78px; border-radius: 50%; cursor: pointer;
+      border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+      font-size: 27px; display: grid; place-items: center;
+      transition: transform .12s, background .2s, border-color .2s;
+    }
+    #mic:hover { border-color: rgba(255,255,255,.22); }
+    #mic:active { transform: scale(.95); }
+    #mic:disabled { opacity: .45; cursor: not-allowed; }
+    #mic.on { background: var(--danger); border-color: var(--danger); color: #2b0707; }
+    #mic.on::after {
+      content: ''; position: absolute; inset: -7px; border-radius: 50%;
+      border: 1px solid var(--danger); opacity: .45; animation: ring 1.8s ease-out infinite;
+    }
+    @keyframes ring { 0% { transform: scale(.92); opacity: .5; } 100% { transform: scale(1.16); opacity: 0; } }
+    #micLabel { font-size: 13px; color: var(--muted); min-height: 18px; text-align: center; }
+
+    .meter { width: 74px; height: 2px; background: var(--line); border-radius: 2px; overflow: hidden; }
+    .meter > div { height: 100%; width: 0; background: var(--accent); transition: width .07s linear; }
+
+    /* ── Pie de estado ── */
+    footer {
+      flex: none; display: flex; align-items: center; justify-content: center; gap: 8px;
+      max-width: 620px; width: 100%; margin: 14px auto 0; padding-top: 13px;
+      border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); text-align: center;
+    }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #4a4a52; flex: none; }
+    .dot.live { background: var(--accent); }
+    .dot.wait { background: #d4a017; }
+    .dot.err  { background: var(--danger); }
+    footer.alert { color: var(--danger); }
+
+    @media (max-width: 480px) {
+      .line .text { font-size: 19px; }
+      .title { font-size: 24px; }
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>🗣️ Sala de conversación</h1>
-    <p class="sub">Habla en tu idioma y cada persona te escucha en el suyo, en tiempo real. <b>No hay que instalar nada</b>: comparte el enlace y listo. Funciona en el móvil.</p>
+  <header>
+    <div class="brand"><b>PositivoS+</b> En Vivo</div>
+    <div class="top-actions">
+      <button class="icon-btn" id="echoBtn" data-i18n-title="room.headphonesHelp" hidden>🔈</button>
+      <button class="icon-btn" id="langBtn">🌐 <span id="langCode">ES</span></button>
+      <button class="icon-btn" id="leaveBtn" data-i18n="room.leave" hidden></button>
+    </div>
+  </header>
 
-    <div class="card">
-      <div class="row">
-        <div class="col">
-          <div class="label">Tu nombre</div>
-          <input id="name" type="text" placeholder="Andrew" maxlength="40" autocomplete="name">
-        </div>
-        <div class="col">
-          <div class="label">Código de la sala</div>
-          <input id="room" type="text" readonly tabindex="-1" title="Viene del enlace con el que te invitaron">
-        </div>
+  <main>
+    <section id="lobby">
+      <div>
+        <h1 class="title">PositivoS+ En Vivo</h1>
+        <p class="subtitle" data-i18n="app.tagline"></p>
       </div>
-      <div class="row" style="margin-top:14px">
-        <div class="col">
-          <div class="label">Hablo en</div>
-          <select id="speakLang"></select>
-        </div>
-        <div class="col">
-          <div class="label">Escucho en</div>
-          <select id="listenLang"></select>
-        </div>
-      </div>
-      <div class="row" style="margin-top:16px">
-        <button id="toggle">🎧 Entrar</button>
-      </div>
-      <div class="status"><span class="dot" id="dot"></span><span id="statusText">Sin conectar</span></div>
-    </div>
 
-    <div class="card" id="micCard" style="display:none">
-      <div class="label">Tu micrófono</div>
-      <button id="mic" class="mic-off">🎙️ Hablar</button>
-      <div class="meter"><div id="meter"></div></div>
-      <div class="hint" id="micHint">Entras escuchando, con el micrófono apagado. Pulsa <b>Hablar</b> cuando quieras preguntar y vuelve a pulsarlo al terminar.</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Invita a quien quieras</div>
-      <div class="share">
-        <code id="shareLink">—</code>
-        <button id="copyBtn" class="ghost">Copiar enlace</button>
-      </div>
-      <div class="hint">Cualquiera con este enlace entra desde su navegador, elige su idioma y ya se entienden.</div>
-    </div>
-
-    <div class="card">
-      <div class="label">En la sala</div>
-      <div class="peers" id="peers"><span class="hint">Nadie todavía.</span></div>
-    </div>
-
-    <div class="card">
-      <div class="label">Lo que dicen los demás (en tu idioma)</div>
-      <div class="subs" id="subs"></div>
-    </div>
-
-    <div class="card">
-      <div class="label">Lo que se te entiende a ti</div>
-      <div class="self" id="self">—</div>
-      <label class="hint" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:14px">
-        <input type="checkbox" id="antiEcho" style="width:auto;margin-top:2px;flex:none">
-        <span><b>Estoy usando altavoces.</b> Silencia tu micrófono mientras suena la traducción de otra persona, para que no se realimente. Con auriculares déjalo sin marcar: así puedes interrumpir y hablar en cualquier momento.</span>
+      <label class="field">
+        <span data-i18n="lobby.name"></span>
+        <input id="name" type="text" data-i18n-ph="lobby.namePh" maxlength="40" autocomplete="name">
       </label>
-    </div>
 
-    <footer>PositivoS+ En Vivo · <a href="/privacy">Privacidad</a></footer>
-  </div>
+      <div class="pair">
+        <label class="field">
+          <span data-i18n="lobby.speak"></span>
+          <select id="speakLang"></select>
+        </label>
+        <label class="field">
+          <span data-i18n="lobby.listen"></span>
+          <select id="listenLang"></select>
+        </label>
+      </div>
 
+      <button class="primary" id="enterBtn" data-i18n="lobby.enter"></button>
+    </section>
+
+    <section id="room">
+      <div id="subs"></div>
+      <div class="console">
+        <button id="mic">🎙️</button>
+        <div class="meter"><div id="meter"></div></div>
+        <div id="micLabel"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer id="statusBar"><span class="dot" id="dot"></span><span id="statusText"></span></footer>
+
+  <script src="/i18n.js"></script>
   <script src="/langs.js"></script>
   <script src="/audio-lib.js"></script>
   <script src="/sala.js"></script>

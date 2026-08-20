@@ -746,7 +746,7 @@ class Room {
   // Cierra la sala y echa a quien quede dentro.
   close(reason) {
     for (const peer of this.peers.values()) {
-      peer.send({ type: 'error', message: reason });
+      peer.send({ type: 'error', code: 'closed', message: reason });
       peer.dispose();
       peer.ws.close();
     }
@@ -932,6 +932,7 @@ class RoomPeer {
       room: this.room, // para imputar los minutos a esta sala
       onBudgetExhausted: () => this.room.broadcast({
         type: 'error',
+        code: 'budget_exhausted',
         message: 'Se alcanzó el límite de uso de hoy. La traducción se ha detenido.',
       }),
       onAudioDelta: (chunk) => this.sendAudioToListeners(lang, chunk),
@@ -987,7 +988,7 @@ function releaseMic(peer, reason) {
   if (!peer.hasMic) return;
   peer.hasMic = false;
   peer.dispose();
-  peer.send({ type: 'mic_released', message: reason });
+  peer.send({ type: 'mic_released', code: 'mic_idle', message: reason });
   peer.room.broadcast(peer.room.rosterMessage());
   console.log(`[${peer.room.id}] 🔇 ${peer.name} suelta la palabra${reason ? ` (${reason})` : ''}`);
 }
@@ -1002,8 +1003,8 @@ roomWss.on('connection', (ws, req) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
   };
 
-  function reject(message) {
-    send({ type: 'error', message });
+  function reject(message, code) {
+    send({ type: 'error', message, code });
     ws.close();
   }
 
@@ -1014,17 +1015,17 @@ roomWss.on('connection', (ws, req) => {
     // nadie puede ponerse a gastar por su cuenta con solo inventarse un código.
     const room = rooms.get(roomId);
     if (!room) {
-      return reject('Esta sala no existe o ya se cerró. Pide un enlace nuevo a quien te invitó.');
+      return reject('Esta sala no existe o ya se cerró.', 'room_not_found');
     }
     if (room.expired) {
       room.close('La sala ha caducado.');
-      return reject('Esta sala ha caducado. Pide un enlace nuevo a quien te invitó.');
+      return reject('Esta sala ha caducado.', 'room_expired');
     }
     if (room.peers.size >= room.maxPeers) {
-      return reject(`La sala está llena (máximo ${room.maxPeers} personas).`);
+      return reject(`La sala está llena (máximo ${room.maxPeers} personas).`, 'room_full');
     }
     if (billing.exhausted()) {
-      return reject('Se alcanzó el límite de uso de hoy. Vuelve a intentarlo mañana.');
+      return reject('Se alcanzó el límite de uso de hoy.', 'budget_exhausted');
     }
 
     peer = new RoomPeer(ws, room, {
@@ -1076,6 +1077,7 @@ roomWss.on('connection', (ws, req) => {
         if (speaking.length >= peer.room.maxSpeakers) {
           peer.send({
             type: 'mic_denied',
+            code: 'mic_busy',
             message: speaking.length === 1
               ? `${speaking[0].name} está hablando. Espera a que termine.`
               : `Ya hay ${speaking.length} personas hablando. Espera tu turno.`,
@@ -1110,6 +1112,7 @@ roomWss.on('connection', (ws, req) => {
         if (peer.translators.size === 0) {
           peer.send({
             type: 'notice',
+            code: peer.room.peers.size <= 1 ? 'alone' : 'no_target',
             message: peer.room.peers.size <= 1
               ? 'Eres la única persona en la sala. Comparte el código para que alguien entre.'
               : `Nadie necesita traducción: los demás ya escuchan en ${peer.speakLang}. Cambia tu idioma o pídeles que cambien el suyo.`,
