@@ -3,11 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#08080a">
+  <meta name="theme-color" content="#0a0d0b">
   <title>PositivoS+ En Vivo</title>
   <style>
-    :root { --bg:#08080a; --fg:#f4f4f5; --muted:#7c7c85; --line:rgba(255,255,255,.09);
-            --surface:rgba(255,255,255,.035); --r:14px; }
+    /* Colores corporativos: verde #10D451, magenta #B33D9E, blanco #FFFFFF,
+       gris medio #A1ADAD, gris claro #E0EBE7. */
+    :root { --bg:#0a0d0b; --fg:#FFFFFF; --muted:#A1ADAD; --line:rgba(224,235,231,.14);
+            --surface:rgba(224,235,231,.05); --accent:#10D451; --r:14px; }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { height: 100%; }
     body { margin:0; background:var(--bg); color:var(--fg); display:grid; place-items:center; padding:24px;
@@ -20,9 +22,9 @@
     input { width:100%; background:var(--surface); border:1px solid var(--line); color:var(--fg);
       border-radius:var(--r); padding:14px 15px; font:inherit; font-size:16px; outline:none;
       transition:border-color .15s; }
-    input:focus { border-color:rgba(255,255,255,.25); }
+    input:focus { border-color:rgba(16,212,81,.55); }
     button { border:none; border-radius:var(--r); padding:16px; cursor:pointer; background:var(--fg);
-      color:#0a0a0c; font:inherit; font-size:16px; font-weight:600; transition:opacity .15s; }
+      color:#0a0d0b; font:inherit; font-size:16px; font-weight:600; transition:opacity .15s; }
     button:hover { opacity:.88; }
     .help { color:var(--muted); font-size:13px; text-align:center; }
     .lang { position:fixed; top:18px; right:18px; background:none; border:none; color:var(--muted);

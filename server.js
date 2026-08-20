@@ -1315,13 +1315,14 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
     });
   }
 
+  // Solo los días con algo que contar: una lista de ceros no informa de nada.
   const dias = [...new Set([...Object.keys(medidos), ...Object.keys(reales)])].sort().slice(-8);
   const filas = dias.map((day) => ({
     day,
     minutes: +(medidos[day] || 0).toFixed(2),
     real: reales[day] ? +reales[day].total.toFixed(4) : null,
     lines: reales[day]?.lineas || {},
-  }));
+  })).filter((f) => f.minutes > 0 || f.real > 0);
 
   // El precio real se saca de los días ya CERRADOS con consumo: el de hoy aún
   // no está facturado del todo y falsearía la media.
@@ -1339,6 +1340,19 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
     todayMinutes: +medidos[hoy].toFixed(2),
     todayEstimate: +(medidos[hoy] * (precioReal || PRICE_PER_MINUTE)).toFixed(3),
   });
+});
+
+// Borra el histórico de minutos medidos. Útil cuando arrastra datos que ya no
+// significan nada (los de las pruebas, por ejemplo), que además falsean el
+// cálculo del precio real por minuto.
+app.post('/admin/api/costs/reset', requireAdmin, (_req, res) => {
+  billing.history = {};
+  billing.usedMs = 0;
+  for (const room of rooms.values()) room.usedMs = 0;
+  costsCache = { at: 0, data: null };
+  saveState();
+  console.log('[admin] Histórico de consumo borrado');
+  res.json({ ok: true });
 });
 
 app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
@@ -1359,22 +1373,36 @@ app.get('/admin', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html'
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'estado-salas.json');
 let saveTimer = null;
 
+function stateSnapshot() {
+  return JSON.stringify({
+    billing: { day: billing.day, usedMs: billing.usedMs, history: billing.history },
+    rooms: [...rooms.values()].map((r) => ({
+      id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
+      maxPeers: r.maxPeers, maxSpeakers: r.maxSpeakers, langs: r.langs, usedMs: r.usedMs,
+    })),
+  });
+}
+
 function saveState() {
   // Se agrupa: no tiene sentido escribir el fichero en cada cambio suelto.
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const data = {
-      billing: { day: billing.day, usedMs: billing.usedMs, history: billing.history },
-      rooms: [...rooms.values()].map((r) => ({
-        id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
-        maxPeers: r.maxPeers, maxSpeakers: r.maxSpeakers, langs: r.langs, usedMs: r.usedMs,
-      })),
-    };
-    fs.writeFile(STATE_FILE, JSON.stringify(data), (err) => {
+    fs.writeFile(STATE_FILE, stateSnapshot(), (err) => {
       if (err) console.error('[Estado] No se pudo guardar:', err.message);
     });
   }, 1000);
+}
+
+// Al apagar hay que escribir YA: si Render reinicia dentro del segundo de
+// espera, se perdería el último cambio (una sala recién creada, por ejemplo).
+function flushState() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  try { fs.writeFileSync(STATE_FILE, stateSnapshot()); } catch { /* disco de solo lectura */ }
+}
+
+for (const señal of ['SIGTERM', 'SIGINT']) {
+  process.on(señal, () => { flushState(); process.exit(0); });
 }
 
 function loadState() {

@@ -8,52 +8,52 @@
   <style>
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      margin: 0; min-height: 100vh; background: linear-gradient(135deg,#1a1a2e,#2d2d54);
-      color: #fff; padding: 22px; display: flex; flex-direction: column; align-items: center; }
+      margin: 0; min-height: 100vh; background: #0a0d0b;
+      color: #FFFFFF; padding: 22px; display: flex; flex-direction: column; align-items: center; }
     .wrap { max-width: 860px; width: 100%; }
     h1 { font-size: 24px; margin: 4px 0 6px; }
-    p.sub { color: #b8b8d8; margin: 0 0 20px; line-height: 1.55; font-size: 15px; }
-    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+    p.sub { color: #A1ADAD; margin: 0 0 20px; line-height: 1.55; font-size: 15px; }
+    .card { background: rgba(224,235,231,.05); border: 1px solid rgba(224,235,231,.14);
       border-radius: 16px; padding: 20px; margin-bottom: 14px; }
-    .label { color: #9a9ac0; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
+    .label { color: #A1ADAD; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
     .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
     .col { flex: 1 1 150px; min-width: 130px; }
-    input { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
+    input { width: 100%; background: rgba(224,235,231,.05); border: 1px solid rgba(224,235,231,.14);
       color: #fff; border-radius: 10px; padding: 12px; font-size: 15px; }
     button { font-size: 15px; font-weight: 600; border: none; border-radius: 10px; padding: 12px 20px;
-      cursor: pointer; background: #4ade80; color: #06301a; }
+      cursor: pointer; background: #10D451; color: #04250f; }
     button:hover { filter: brightness(1.08); }
-    button.danger { background: rgba(248,113,113,.15); color: #fca5a5; border: 1px solid rgba(248,113,113,.35);
+    button.danger { background: rgba(179,61,158,.18); color: #e59fd6; border: 1px solid rgba(179,61,158,.45);
       font-size: 13px; padding: 8px 14px; }
-    button.ghost { background: rgba(255,255,255,0.12); color: #fff; font-size: 13px; padding: 8px 14px; font-weight: 500; }
-    .bar { height: 10px; background: rgba(255,255,255,.1); border-radius: 5px; overflow: hidden; margin: 10px 0 6px; }
-    .bar > div { height: 100%; background: #4ade80; transition: width .3s; }
-    .bar.warn > div { background: #facc15; }
-    .bar.over > div { background: #f87171; }
+    button.ghost { background: rgba(224,235,231,.1); color: #FFFFFF; font-size: 13px; padding: 8px 14px; font-weight: 500; }
+    .bar { height: 10px; background: rgba(224,235,231,.12); border-radius: 5px; overflow: hidden; margin: 10px 0 6px; }
+    .bar > div { height: 100%; background: #10D451; transition: width .3s; }
+    .bar.warn > div { background: #B33D9E; }
+    .bar.over > div { background: #B33D9E; }
     .big { font-size: 26px; font-weight: 700; }
-    .muted { color: #9a9ac0; font-size: 13px; line-height: 1.5; }
+    .muted { color: #A1ADAD; font-size: 13px; line-height: 1.5; }
     table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; color: #9a9ac0; font-size: 11px; text-transform: uppercase;
+    th { text-align: left; color: #A1ADAD; font-size: 11px; text-transform: uppercase;
       letter-spacing: .5px; padding: 0 8px 10px 0; font-weight: 600; }
-    td { padding: 12px 8px 12px 0; border-top: 1px solid rgba(255,255,255,.08); font-size: 14px; vertical-align: middle; }
-    td.code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 15px; color: #8fd6ff; }
-    .who { color: #9a9ac0; font-size: 12px; display: block; margin-top: 3px; }
+    td { padding: 12px 8px 12px 0; border-top: 1px solid rgba(224,235,231,.1); font-size: 14px; vertical-align: middle; }
+    td.code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 15px; color: #10D451; }
+    .who { color: #A1ADAD; font-size: 12px; display: block; margin-top: 3px; }
     .msg { border-radius: 10px; padding: 12px 14px; font-size: 14px; margin-bottom: 14px; line-height: 1.5; display: none; }
-    .msg.err { background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.3); color: #fca5a5; }
-    .msg.ok  { background: rgba(74,222,128,.12); border: 1px solid rgba(74,222,128,.3); color: #86efac; }
+    .msg.err { background: rgba(179,61,158,.12); border: 1px solid rgba(179,61,158,.35); color: #e59fd6; }
+    .msg.ok  { background: rgba(16,212,81,.12); border: 1px solid rgba(16,212,81,.35); color: #7ff0a8; }
     .msg code { display: block; margin-top: 8px; background: rgba(0,0,0,.35); padding: 10px;
-      border-radius: 8px; color: #8fd6ff; overflow-x: auto; white-space: nowrap; }
+      border-radius: 8px; color: #10D451; overflow-x: auto; white-space: nowrap; }
     .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-    .chip { display: inline-flex; align-items: center; gap: 7px; background: rgba(255,255,255,.07);
-      border: 1px solid rgba(255,255,255,.14); border-radius: 999px; padding: 9px 15px;
+    .chip { display: inline-flex; align-items: center; gap: 7px; background: rgba(224,235,231,.06);
+      border: 1px solid rgba(224,235,231,.14); border-radius: 999px; padding: 9px 15px;
       cursor: pointer; font-size: 13.5px; user-select: none; transition: all .12s; }
-    .chip:hover { border-color: rgba(255,255,255,.3); }
+    .chip:hover { border-color: rgba(224,235,231,.32); }
     .chip input { display: none; }
     .chip .tick { opacity: 0; font-size: 11px; }
-    .chip.on { background: rgba(74,222,128,.18); border-color: rgba(74,222,128,.5); color: #d9ffe6; }
+    .chip.on { background: rgba(16,212,81,.18); border-color: rgba(16,212,81,.55); color: #E0EBE7; }
     .chip.on .tick { opacity: 1; }
-    .warnbox { background: rgba(250,204,21,.1); border: 1px solid rgba(250,204,21,.3);
-      border-radius: 8px; padding: 10px 12px; color: #fde68a; }
+    .warnbox { background: rgba(179,61,158,.12); border: 1px solid rgba(179,61,158,.35);
+      border-radius: 8px; padding: 10px 12px; color: #e59fd6; }
     #gate { max-width: 420px; margin: 60px auto; }
     #panel { display: none; }
   </style>
@@ -85,16 +85,6 @@
         <div class="big" id="usedLabel">—</div>
         <div class="bar" id="bar"><div></div></div>
         <div class="muted" id="budgetHint"></div>
-      </div>
-
-      <div class="card">
-        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
-          <div class="label" style="margin:0">Coste</div>
-          <button class="ghost" id="refreshCosts">Consultar factura</button>
-        </div>
-        <div class="big" id="costToday">—</div>
-        <div class="muted" id="costHint">Pulsa "Consultar factura" para cruzar lo medido con lo que OpenAI cobró de verdad.</div>
-        <div id="costTable" style="margin-top:14px"></div>
       </div>
 
       <div class="card">
@@ -148,6 +138,17 @@
         </div>
         <div id="rooms"></div>
       </div>
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div class="label" style="margin:0">Coste</div>
+          <button class="ghost" id="refreshCosts">Consultar factura</button>
+          <button class="danger" id="clearCosts">Borrar histórico</button>
+        </div>
+        <div class="big" id="costToday">—</div>
+        <div class="muted" id="costHint">Pulsa "Consultar factura" para cruzar lo medido con lo que OpenAI cobró de verdad.</div>
+        <div id="costTable" style="margin-top:14px"></div>
+      </div>
+
     </div>
   </div>
 

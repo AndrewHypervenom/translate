@@ -3,17 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#08080a">
+  <meta name="theme-color" content="#0a0d0b">
   <title>PositivoS+ En Vivo</title>
   <style>
+    /* Colores corporativos: verde #10D451, magenta #B33D9E,
+       blanco #FFFFFF, gris medio #A1ADAD, gris claro #E0EBE7. */
     :root {
-      --bg: #08080a;
-      --fg: #f4f4f5;
-      --muted: #7c7c85;
-      --line: rgba(255,255,255,.09);
-      --surface: rgba(255,255,255,.035);
-      --accent: #34d399;
-      --danger: #f87171;
+      --bg: #0a0d0b;
+      --fg: #FFFFFF;
+      --muted: #A1ADAD;
+      --soft: #E0EBE7;
+      --line: rgba(224,235,231,.14);
+      --surface: rgba(224,235,231,.05);
+      --accent: #10D451;
+      --accent-2: #B33D9E;
       --r: 14px;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -57,15 +60,15 @@
       border-radius: var(--r); padding: 14px 15px; font: inherit; font-size: 16px;
       outline: none; transition: border-color .15s;
     }
-    input:focus, select:focus { border-color: rgba(255,255,255,.25); }
+    input:focus, select:focus { border-color: rgba(16,212,81,.55); }
     select { appearance: none; cursor: pointer;
       background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
       background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
       background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
-    select option { background: #16161a; color: var(--fg); }
+    select option { background: #141815; color: var(--fg); }
     .primary {
       width: 100%; border: none; border-radius: var(--r); padding: 16px; cursor: pointer;
-      background: var(--fg); color: #0a0a0c; font: inherit; font-size: 16px; font-weight: 600;
+      background: var(--fg); color: #0a0d0b; font: inherit; font-size: 16px; font-weight: 600;
       transition: opacity .15s, transform .06s;
     }
     .primary:hover { opacity: .88; }
@@ -86,7 +89,7 @@
     .line .who { display: block; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
       color: var(--muted); margin-bottom: 5px; }
     .line .text { font-size: 21px; line-height: 1.42; letter-spacing: -.01em; }
-    .line.live .text { color: #c9c9d1; }
+    .line.live .text { color: var(--soft); }
     .line.old { opacity: .38; }
     @keyframes rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 
@@ -100,13 +103,13 @@
       font-size: 27px; display: grid; place-items: center;
       transition: transform .12s, background .2s, border-color .2s;
     }
-    #mic:hover { border-color: rgba(255,255,255,.22); }
+    #mic:hover { border-color: rgba(16,212,81,.45); }
     #mic:active { transform: scale(.95); }
     #mic:disabled { opacity: .45; cursor: not-allowed; }
-    #mic.on { background: var(--danger); border-color: var(--danger); color: #2b0707; }
+    #mic.on { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
     #mic.on::after {
       content: ''; position: absolute; inset: -7px; border-radius: 50%;
-      border: 1px solid var(--danger); opacity: .45; animation: ring 1.8s ease-out infinite;
+      border: 1px solid var(--accent-2); opacity: .45; animation: ring 1.8s ease-out infinite;
     }
     @keyframes ring { 0% { transform: scale(.92); opacity: .5; } 100% { transform: scale(1.16); opacity: 0; } }
     #micLabel { font-size: 13px; color: var(--muted); min-height: 18px; text-align: center; }
@@ -120,11 +123,11 @@
       max-width: 620px; width: 100%; margin: 14px auto 0; padding-top: 13px;
       border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); text-align: center;
     }
-    .dot { width: 6px; height: 6px; border-radius: 50%; background: #4a4a52; flex: none; }
-    .dot.live { background: var(--accent); }
-    .dot.wait { background: #d4a017; }
-    .dot.err  { background: var(--danger); }
-    footer.alert { color: var(--danger); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; opacity: .5; }
+    .dot.live { background: var(--accent); opacity: 1; }
+    .dot.wait { background: var(--accent-2); opacity: 1; }
+    .dot.err  { background: var(--accent-2); opacity: 1; }
+    footer.alert { color: var(--accent-2); }
 
     @media (max-width: 480px) {
       .line .text { font-size: 19px; }

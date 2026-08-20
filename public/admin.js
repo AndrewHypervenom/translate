@@ -70,6 +70,11 @@ async function loadCosts() {
       + 'En cuanto haya un día completo facturado, aquí saldrá tu precio real.';
   }
 
+  if (!c.days.length) {
+    el('costTable').innerHTML = '<div class="muted">Todavía no hay consumo registrado.</div>';
+    return;
+  }
+
   el('costTable').innerHTML = `
     <table>
       <thead><tr><th>Día</th><th>Medido</th><th>Facturado</th><th>Real por minuto</th></tr></thead>
@@ -284,6 +289,14 @@ el('key').onkeydown = (e) => { if (e.key === 'Enter') unlock(el('key').value.tri
 el('create').onclick = createRoom;
 el('refresh').onclick = refresh;
 el('refreshCosts').onclick = loadCosts;
+el('clearCosts').onclick = async () => {
+  if (!confirm('¿Borrar el histórico de consumo medido? La factura de OpenAI no se toca.')) return;
+  try {
+    await api('/costs/reset', { method: 'POST' });
+    await loadCosts();
+    refresh();
+  } catch (e) { show('err', esc(e.message)); }
+};
 
 // Si ya entraste en este navegador, no vuelve a pedir la clave.
 const saved = (() => { try { return localStorage.getItem(KEY_STORE); } catch { return null; } })();
