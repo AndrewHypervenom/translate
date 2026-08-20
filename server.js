@@ -84,6 +84,60 @@ function hasRepetitionLoop(text) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// CONTROL DE ACCESO Y DE GASTO
+// ════════════════════════════════════════════════════════════════════════════
+// Todo el audio que entra aquí se reenvía a OpenAI, y eso cuesta dinero. Sin
+// estas dos barreras, cualquiera con la URL podría abrir salas sin parar:
+//   · Solo el administrador crea salas. Quien tenga el enlace únicamente puede
+//     UNIRSE a una sala que ya exista, y solo mientras siga abierta.
+//   · Hay un tope de minutos al día. Al alcanzarlo se deja de traducir, se
+//     avisa a todo el mundo y no se gasta un céntimo más hasta el día siguiente.
+
+const ADMIN_KEY = process.env.ADMIN_KEY || crypto.randomBytes(12).toString('hex');
+const ADMIN_KEY_IS_TEMPORARY = !process.env.ADMIN_KEY;
+
+// Minutos de audio traducido al día. Ojo: si en una sala hablas 1 minuto y hay
+// gente escuchando en 2 idiomas distintos, son 2 minutos de traducción.
+const DAILY_LIMIT_MINUTES = Number(process.env.DAILY_LIMIT_MINUTES || 120);
+const ROOM_DEFAULT_MINUTES = Number(process.env.ROOM_DEFAULT_MINUTES || 60);
+const ROOM_DEFAULT_MAX_PEERS = Number(process.env.ROOM_MAX_PEERS || 8);
+const MAX_OPEN_ROOMS = Number(process.env.MAX_OPEN_ROOMS || 20);
+
+// Cuántos ms de audio representa un trozo en base64 de PCM16 mono a 24 kHz.
+function audioMsFromBase64(base64) {
+  const bytes = Math.floor((base64.length * 3) / 4);
+  return bytes / 2 / (SAMPLE_RATE / 1000);
+}
+
+const billing = {
+  day: new Date().toISOString().slice(0, 10),
+  usedMs: 0,
+
+  rollOver() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this.day) {
+      console.log(`[Gasto] Nuevo día (${today}): contador a cero`);
+      this.day = today;
+      this.usedMs = 0;
+      for (const room of rooms.values()) room.usedMs = 0;
+    }
+  },
+
+  limitMs() { return DAILY_LIMIT_MINUTES * 60 * 1000; },
+  remainingMs() { this.rollOver(); return Math.max(0, this.limitMs() - this.usedMs); },
+  exhausted() { return this.remainingMs() <= 0; },
+
+  // Devuelve false si ya no queda presupuesto: el audio no se envía.
+  charge(ms, room) {
+    this.rollOver();
+    if (this.usedMs + ms > this.limitMs()) return false;
+    this.usedMs += ms;
+    if (room) room.usedMs += ms;
+    return true;
+  },
+};
+
+// ════════════════════════════════════════════════════════════════════════════
 // SESIÓN DE TRADUCCIÓN
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -115,6 +169,8 @@ class TranslatorSession {
     this.targetLang = targetLang;
     this.on = handlers;
     this.label = handlers.label || targetLang;
+    this.room = handlers.room || null; // para imputarle el gasto, si viene de una sala
+    this.outOfBudget = false;
 
     this.ws = null;
     this.ready = false;
@@ -347,6 +403,15 @@ class TranslatorSession {
   }
 
   pushAudio(base64) {
+    // Se cobra aquí, que es el único punto por el que sale audio hacia OpenAI.
+    if (!billing.charge(audioMsFromBase64(base64), this.room)) {
+      if (!this.outOfBudget) {
+        this.outOfBudget = true;
+        console.warn(`[${this.label}] Presupuesto diario agotado: se deja de traducir`);
+        this.on.onBudgetExhausted?.();
+      }
+      return;
+    }
     this.lastAudioAt = Date.now();
     if (this.ready && this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'session.input_audio_buffer.append', audio: base64 }));
@@ -536,11 +601,19 @@ wss.on('connection', (clientWs) => {
 // traducción por cada idioma distinto que escuchen LOS DEMÁS, y su salida va
 // solo a esos participantes: nadie recibe nunca su propia traducción.
 
-const MAX_PEERS_PER_ROOM = 16;
-const MAX_ROOMS = 200;
 const MAX_TARGET_LANGS_PER_SPEAKER = 6; // tope de coste por hablante
 
 const rooms = new Map();
+
+// Códigos cortos, legibles por teléfono y no adivinables. Sin vocales, para que
+// no salgan palabras por accidente, y sin caracteres que se confundan (0/O, 1/l).
+const CODE_ALPHABET = 'bcdfghjkmnpqrstvwxyz23456789';
+function randomRoomCode(length = 7) {
+  const bytes = crypto.randomBytes(length);
+  let code = '';
+  for (let i = 0; i < length; i++) code += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  return code;
+}
 
 // Debe coincidir con normalizeRoomId() de room.js, o "mi equipo" escrito en la
 // página y "mi equipo" puesto a mano en la URL acabarían en salas distintas.
@@ -553,9 +626,41 @@ function normalizeRoomId(raw) {
 }
 
 class Room {
-  constructor(id) {
+  constructor(id, { label = '', minutes = ROOM_DEFAULT_MINUTES, maxPeers = ROOM_DEFAULT_MAX_PEERS } = {}) {
     this.id = id;
+    this.label = label;
     this.peers = new Map();
+    this.createdAt = Date.now();
+    this.expiresAt = Date.now() + minutes * 60 * 1000;
+    this.maxPeers = maxPeers;
+    this.usedMs = 0;
+  }
+
+  get expired() { return Date.now() > this.expiresAt; }
+
+  // Cierra la sala y echa a quien quede dentro.
+  close(reason) {
+    for (const peer of this.peers.values()) {
+      peer.send({ type: 'error', message: reason });
+      peer.dispose();
+      peer.ws.close();
+    }
+    this.peers.clear();
+    rooms.delete(this.id);
+    console.log(`[${this.id}] Sala cerrada: ${reason}`);
+  }
+
+  summary() {
+    return {
+      code: this.id,
+      label: this.label,
+      peers: this.roster(),
+      peerCount: this.peers.size,
+      maxPeers: this.maxPeers,
+      minutesUsed: +(this.usedMs / 60000).toFixed(2),
+      minutesLeft: Math.max(0, Math.round((this.expiresAt - Date.now()) / 60000)),
+      expired: this.expired,
+    };
   }
 
   // Idiomas a los que hay que traducir a este hablante: los que escuchan los
@@ -621,6 +726,11 @@ class RoomPeer {
     let translator;
     translator = new TranslatorSession(lang, {
       label: `${this.room.id}/${this.name}→${lang}`,
+      room: this.room, // para imputar los minutos a esta sala
+      onBudgetExhausted: () => this.room.broadcast({
+        type: 'error',
+        message: 'Se alcanzó el límite de uso de hoy. La traducción se ha detenido.',
+      }),
       onAudioDelta: (chunk) =>
         this.room.sendToListeners(lang, this, { type: 'audio', chunk, from: this.id }),
       onOutputDelta: (_delta, _itemId, full) =>
@@ -671,21 +781,29 @@ roomWss.on('connection', (ws, req) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
   };
 
+  function reject(message) {
+    send({ type: 'error', message });
+    ws.close();
+  }
+
   function join(msg) {
     const roomId = normalizeRoomId(msg.room || new URL(req.url, 'http://x').searchParams.get('room'));
 
-    let room = rooms.get(roomId);
+    // Las salas NO se crean al conectar: solo las abre el administrador. Así
+    // nadie puede ponerse a gastar por su cuenta con solo inventarse un código.
+    const room = rooms.get(roomId);
     if (!room) {
-      if (rooms.size >= MAX_ROOMS) {
-        send({ type: 'error', message: 'El servidor está al límite de salas. Intenta en unos minutos.' });
-        return ws.close();
-      }
-      room = new Room(roomId);
-      rooms.set(roomId, room);
+      return reject('Esta sala no existe o ya se cerró. Pide un enlace nuevo a quien te invitó.');
     }
-    if (room.peers.size >= MAX_PEERS_PER_ROOM) {
-      send({ type: 'error', message: `La sala "${roomId}" está llena (máximo ${MAX_PEERS_PER_ROOM}).` });
-      return ws.close();
+    if (room.expired) {
+      room.close('La sala ha caducado.');
+      return reject('Esta sala ha caducado. Pide un enlace nuevo a quien te invitó.');
+    }
+    if (room.peers.size >= room.maxPeers) {
+      return reject(`La sala está llena (máximo ${room.maxPeers} personas).`);
+    }
+    if (billing.exhausted()) {
+      return reject('Se alcanzó el límite de uso de hoy. Vuelve a intentarlo mañana.');
     }
 
     peer = new RoomPeer(ws, room, {
@@ -752,8 +870,9 @@ roomWss.on('connection', (ws, req) => {
     peer.dispose();
     room.peers.delete(peer.id);
     console.log(`[${room.id}] - ${peer.name} — ${room.peers.size} en sala`);
-    if (room.peers.size === 0) rooms.delete(room.id);
-    else room.broadcast({ type: 'peers', peers: room.roster() });
+    // La sala NO se borra al quedarse vacía: sigue abierta hasta que caduque o
+    // el administrador la cierre, para poder volver a entrar con el mismo enlace.
+    room.broadcast({ type: 'peers', peers: room.roster() });
     peer = null;
   });
 });
@@ -770,6 +889,79 @@ app.use(express.static(PUBLIC_DIR));
 app.get(['/sala', '/sala/:code'], (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'sala.html'));
 });
+
+// ── Administración ────────────────────────────────────────────────────────────
+// Solo desde aquí se abren salas. La página /admin es estática; lo que está
+// protegido es la API, que es la que puede gastar dinero.
+
+app.use(express.json());
+
+function requireAdmin(req, res, next) {
+  const key = req.get('x-admin-key') || req.query.key;
+  // Comparación en tiempo constante para no filtrar la clave a base de reintentos.
+  // Se comparan los BYTES, no la longitud del texto: con acentos o emojis dos
+  // cadenas del mismo largo pueden ocupar distinto, y timingSafeEqual reventaría.
+  const given = Buffer.from(String(key ?? ''), 'utf8');
+  const expected = Buffer.from(ADMIN_KEY, 'utf8');
+  const ok = given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  if (!ok) return res.status(401).json({ error: 'Clave de administrador incorrecta.' });
+  next();
+}
+
+app.get('/admin/api/state', requireAdmin, (_req, res) => {
+  sweepRooms();
+  res.json({
+    rooms: [...rooms.values()].map((r) => r.summary()),
+    budget: {
+      limitMinutes: DAILY_LIMIT_MINUTES,
+      usedMinutes: +(billing.usedMs / 60000).toFixed(2),
+      remainingMinutes: +(billing.remainingMs() / 60000).toFixed(2),
+      day: billing.day,
+    },
+    defaults: { minutes: ROOM_DEFAULT_MINUTES, maxPeers: ROOM_DEFAULT_MAX_PEERS },
+  });
+});
+
+app.post('/admin/api/rooms', requireAdmin, (req, res) => {
+  sweepRooms();
+  if (rooms.size >= MAX_OPEN_ROOMS) {
+    return res.status(429).json({ error: `Ya hay ${MAX_OPEN_ROOMS} salas abiertas. Cierra alguna antes de crear otra.` });
+  }
+  if (billing.exhausted()) {
+    return res.status(429).json({ error: 'Se alcanzó el límite de minutos de hoy.' });
+  }
+
+  const code = req.body?.code ? normalizeRoomId(req.body.code) : randomRoomCode();
+  if (rooms.has(code)) {
+    return res.status(409).json({ error: `Ya existe una sala con el código "${code}".` });
+  }
+
+  const minutes = Math.min(480, Math.max(5, Number(req.body?.minutes) || ROOM_DEFAULT_MINUTES));
+  const maxPeers = Math.min(16, Math.max(2, Number(req.body?.maxPeers) || ROOM_DEFAULT_MAX_PEERS));
+  const label = String(req.body?.label || '').slice(0, 60);
+
+  const room = new Room(code, { label, minutes, maxPeers });
+  rooms.set(code, room);
+  console.log(`[admin] Sala creada "${code}" — ${minutes} min, hasta ${maxPeers} personas`);
+  res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });
+});
+
+app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
+  const room = rooms.get(normalizeRoomId(req.params.code));
+  if (!room) return res.status(404).json({ error: 'Esa sala no existe.' });
+  room.close('El administrador cerró la sala.');
+  res.json({ ok: true });
+});
+
+app.get('/admin', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
+
+// Cierra sola cualquier sala que haya pasado de su hora.
+function sweepRooms() {
+  for (const room of [...rooms.values()]) {
+    if (room.expired) room.close('La sala ha caducado.');
+  }
+}
+setInterval(sweepRooms, 30000);
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -844,8 +1036,17 @@ server.on('upgrade', (req, socket, head) => {
   const route = (wsServer) =>
     wsServer.handleUpgrade(req, socket, head, (ws) => wsServer.emit('connection', ws, req));
 
-  if (pathname === '/ws') route(wss);
-  else if (pathname === '/room') route(roomWss);
+  if (pathname === '/ws') {
+    // Este canal también gasta dinero y no tiene sala que lo limite, así que
+    // exige la clave. La extensión la lleva en config.js; solo la usas tú.
+    const key = new URL(req.url, 'http://localhost').searchParams.get('key');
+    if (key !== ADMIN_KEY) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    route(wss);
+  } else if (pathname === '/room') route(roomWss);
   else socket.destroy();
 });
 
@@ -853,6 +1054,10 @@ console.log('[Motor] gpt-realtime-translate — solo traduce, conserva la voz de
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`\nTraducción 1-a-1  → ws://localhost:${PORT}/ws`);
-  console.log(`Sala bidireccional → ws://localhost:${PORT}/room\n`);
+  console.log(`\nPanel de administración → http://localhost:${PORT}/admin`);
+  console.log(`Tope de gasto           → ${DAILY_LIMIT_MINUTES} min de traducción al día`);
+  if (ADMIN_KEY_IS_TEMPORARY) {
+    console.log(`\n⚠  ADMIN_KEY no está configurada. Clave TEMPORAL de esta sesión:\n   ${ADMIN_KEY}`);
+    console.log('   Cambia de valor en cada reinicio. Ponla en las variables de entorno.\n');
+  }
 });

@@ -22,6 +22,7 @@ let processor = null;
 let gate = null;
 let active = false;
 let myPeerId = null;
+let rejected = false; // el servidor nos negó la entrada y explicó por qué
 
 const players = new Map();  // peerId -> PCMPlayer (uno por interlocutor)
 const partials = new Map(); // peerId -> texto en curso
@@ -120,6 +121,7 @@ async function start() {
   }
   el.room.value = roomId;
   refreshShareLink();
+  rejected = false;
 
   setStatus('Pidiendo permiso para el micrófono…', 'wait');
   try {
@@ -163,7 +165,11 @@ async function start() {
     });
   };
   ws.onclose = () => {
-    if (active) setStatus('Conexión perdida — vuelve a entrar', 'err');
+    // Si el servidor nos rechazó (sala inexistente, llena o caducada) ya mandó
+    // el motivo antes de cerrar: no lo pisamos con un "conexión perdida".
+    if (!active) return;
+    if (rejected) { stop({ keepStatus: true }); return; }
+    setStatus('Conexión perdida — vuelve a entrar', 'err');
   };
   ws.onmessage = ({ data }) => {
     let msg;
@@ -210,7 +216,8 @@ function handleMessage(msg) {
       break;
 
     case 'error':
-      setStatus('Error: ' + msg.message, 'err');
+      if (!myPeerId) rejected = true; // nos rechazó antes de dejarnos entrar
+      setStatus(msg.message, 'err');
       break;
   }
 }
@@ -236,7 +243,9 @@ function onAudioFrame(e) {
   if (ended) send({ type: 'speech_end' });
 }
 
-function stop() {
+// keepStatus: el servidor ya explicó por qué nos echó (sala inexistente, llena,
+// caducada…) y ese motivo no se debe pisar con un "Fuera de la sala" genérico.
+function stop({ keepStatus = false } = {}) {
   active = false;
   processor?.disconnect();
   processor = null;
@@ -253,7 +262,7 @@ function stop() {
   el.meter.style.width = '0%';
   el.toggle.textContent = '🎙️ Entrar y hablar';
   el.toggle.className = '';
-  setStatus('Fuera de la sala', '');
+  if (!keepStatus) setStatus('Fuera de la sala', '');
   renderPeers([]);
 }
 
