@@ -49,7 +49,7 @@ function renderRooms(list) {
   }
   el('rooms').innerHTML = `
     <table>
-      <thead><tr><th>Código</th><th>Dentro</th><th>Gastado</th><th>Le queda</th><th></th></tr></thead>
+      <thead><tr><th>Código</th><th>Dentro</th><th>Hablando</th><th>Gastado</th><th>Le queda</th><th></th></tr></thead>
       <tbody>${list.map(roomRow).join('')}</tbody>
     </table>`;
 
@@ -63,12 +63,16 @@ function roomRow(room) {
   const who = room.peers.length
     ? room.peers.map((p) => `${esc(p.name)} (habla ${esc(langName(p.speakLang))}, oye ${esc(langName(p.listenLang))})`).join(' · ')
     : 'nadie dentro';
+  const talking = room.speaking?.length
+    ? `🎙️ ${room.speaking.map(esc).join(', ')}`
+    : '<span class="who">nadie</span>';
   return `
     <tr>
       <td class="code">${esc(room.code)}
         ${room.label ? `<span class="who">${esc(room.label)}</span>` : ''}
       </td>
       <td>${room.peerCount}/${room.maxPeers}<span class="who">${who}</span></td>
+      <td>${talking}<span class="who">máx. ${room.maxSpeakers} a la vez</span></td>
       <td>${room.minutesUsed} min</td>
       <td>${room.minutesLeft} min</td>
       <td style="text-align:right;white-space:nowrap">
@@ -99,6 +103,7 @@ async function createRoom() {
         label: el('label').value.trim(),
         minutes: Number(el('minutes').value),
         maxPeers: Number(el('maxPeers').value),
+        maxSpeakers: Number(el('maxSpeakers').value),
       }),
     });
     el('label').value = '';

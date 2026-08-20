@@ -89,11 +89,19 @@
           </div>
           <div class="col" style="flex:0 1 110px">
             <div class="muted" style="margin-bottom:6px">Aforo</div>
-            <input id="maxPeers" type="number" min="2" max="16" value="4">
+            <input id="maxPeers" type="number" min="2" max="60" value="4">
+          </div>
+          <div class="col" style="flex:0 1 130px">
+            <div class="muted" style="margin-bottom:6px">Micrófonos a la vez</div>
+            <input id="maxSpeakers" type="number" min="1" max="6" value="2">
           </div>
           <button id="create">Crear sala</button>
         </div>
-        <div class="muted" style="margin-top:12px">El código se genera al azar para que nadie pueda adivinarlo. La sala se cierra sola al agotar los minutos.</div>
+        <div class="muted" style="margin-top:12px">
+          El código se genera al azar para que nadie pueda adivinarlo, y la sala se cierra sola al agotar los minutos.
+          <b>Micrófonos a la vez</b> es tu tope de gasto simultáneo: todos entran escuchando y solo esa cantidad de
+          personas puede tener la palabra al mismo tiempo. Para una charla con turno de preguntas, 2 va bien.
+        </div>
       </div>
 
       <div class="card">

@@ -48,18 +48,28 @@ class PCMPlayer {
     this.started = false;
   }
 
+  // PCM16 en base64: lo que manda el servidor cuando no hay compresión.
   feed(base64) {
-    if (this.ctx.state === 'suspended') this.ctx.resume();
-
     const bin = atob(base64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
     const samples = bytes.length / 2;
-    const buf = this.ctx.createBuffer(1, samples, PCM_SAMPLE_RATE);
-    const channel = buf.getChannelData(0);
+    const channel = new Float32Array(samples);
     const view = new DataView(bytes.buffer);
     for (let i = 0; i < samples; i++) channel[i] = view.getInt16(i * 2, true) / 32768;
+    this.feedSamples(channel);
+  }
+
+  // Punto común de reproducción: por aquí entran tanto el PCM como lo que sale
+  // del descompresor de Opus, así la cola y el encadenado son los mismos.
+  feedSamples(channel) {
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const samples = channel.length;
+    if (!samples) return;
+
+    const buf = this.ctx.createBuffer(1, samples, PCM_SAMPLE_RATE);
+    buf.getChannelData(0).set(channel);
 
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
@@ -85,6 +95,84 @@ class PCMPlayer {
   reset() {
     this.started = false;
     this.nextTime = 0;
+  }
+}
+
+// ── Reproductor de audio comprimido en Opus ───────────────────────────────────
+// El servidor manda ~32 kbps en vez de 512, unas 12 veces menos datos, con la
+// voz intacta. Descomprime con WebCodecs y entrega las muestras al PCMPlayer,
+// que sigue siendo quien encadena y programa la reproducción.
+//
+// No todos los navegadores traen WebCodecs, así que esto solo se usa cuando
+// `opusSupported()` dice que sí; el resto sigue recibiendo PCM.
+
+async function opusSupported() {
+  if (typeof AudioDecoder === 'undefined') return false;
+  try {
+    const { supported } = await AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: PCM_SAMPLE_RATE,
+      numberOfChannels: 1,
+    });
+    return !!supported;
+  } catch {
+    return false;
+  }
+}
+
+class OpusPlayer {
+  // onFailure: si el descompresor peta a mitad, avisamos para volver a PCM y
+  // que la persona no se quede sin oír nada.
+  constructor(ctx, { onFailure = null } = {}) {
+    this.pcm = new PCMPlayer(ctx);
+    this.timestamp = 0;
+    this.broken = false;
+    this.onFailure = onFailure;
+
+    this.decoder = new AudioDecoder({
+      output: (audioData) => {
+        try {
+          const samples = new Float32Array(audioData.numberOfFrames);
+          audioData.copyTo(samples, { planeIndex: 0, format: 'f32-planar' });
+          this.pcm.feedSamples(samples);
+        } finally {
+          audioData.close(); // sin esto se acumula memoria del descompresor
+        }
+      },
+      error: (err) => this.fail(err),
+    });
+    this.decoder.configure({ codec: 'opus', sampleRate: PCM_SAMPLE_RATE, numberOfChannels: 1 });
+  }
+
+  fail(err) {
+    if (this.broken) return;
+    this.broken = true;
+    console.warn('Opus falló, se vuelve a PCM:', err?.message || err);
+    this.onFailure?.();
+  }
+
+  feed(base64) {
+    if (this.broken) return;
+    try {
+      const bin = atob(base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      // Todas las tramas de Opus son independientes.
+      this.decoder.decode(new EncodedAudioChunk({
+        type: 'key',
+        timestamp: this.timestamp,
+        data: bytes,
+      }));
+      this.timestamp += 20000; // 20 ms por trama, en microsegundos
+    } catch (err) {
+      this.fail(err);
+    }
+  }
+
+  pendingMs() { return this.pcm.pendingMs(); }
+
+  close() {
+    try { this.decoder.close(); } catch { /* ya cerrado */ }
   }
 }
 

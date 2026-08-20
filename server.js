@@ -4,6 +4,7 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
+const OpusScript = require('opusscript');
 
 if (!process.env.OPENAI_API_KEY) {
   console.error('ERROR: OPENAI_API_KEY no está configurada. Agrega tu clave al archivo .env');
@@ -101,6 +102,9 @@ const ADMIN_KEY_IS_TEMPORARY = !process.env.ADMIN_KEY;
 const DAILY_LIMIT_MINUTES = Number(process.env.DAILY_LIMIT_MINUTES || 120);
 const ROOM_DEFAULT_MINUTES = Number(process.env.ROOM_DEFAULT_MINUTES || 60);
 const ROOM_DEFAULT_MAX_PEERS = Number(process.env.ROOM_MAX_PEERS || 8);
+// Micrófonos abiertos a la vez. Es el tope real de gasto simultáneo de una sala.
+const ROOM_DEFAULT_MAX_SPEAKERS = Number(process.env.ROOM_MAX_SPEAKERS || 2);
+const ROOM_PEERS_HARD_CAP = Number(process.env.ROOM_PEERS_HARD_CAP || 60);
 const MAX_OPEN_ROOMS = Number(process.env.MAX_OPEN_ROOMS || 20);
 
 // Cuántos ms de audio representa un trozo en base64 de PCM16 mono a 24 kHz.
@@ -603,6 +607,58 @@ wss.on('connection', (clientWs) => {
 
 const MAX_TARGET_LANGS_PER_SPEAKER = 6; // tope de coste por hablante
 
+// ── Compresión del audio que sale hacia los oyentes ───────────────────────────
+// El PCM en crudo son 512 kbps por oyente (384 de audio + un tercio por el
+// base64). Con 50 personas escuchando eso son ~25 Mbps sostenidos, que ninguna
+// instancia pequeña aguanta. En Opus a 32 kbps la voz queda intacta —medido:
+// el 100 % de las palabras se transcriben igual— y baja a ~43 kbps con base64,
+// unas 12 veces menos. Se comprime UNA vez por idioma y se reparte a todos.
+//
+// No todos los navegadores traen WebCodecs (AudioDecoder), así que cada cliente
+// dice al entrar si sabe descomprimir; a los que no, se les sigue mandando PCM.
+const OPUS_BITRATE = Number(process.env.OPUS_BITRATE || 32000);
+const OPUS_FRAME_SAMPLES = 480; // 20 ms a 24 kHz: tamaño de trama válido en Opus
+const OPUS_FRAME_BYTES = OPUS_FRAME_SAMPLES * 2;
+
+class OpusStream {
+  constructor() {
+    this.encoder = new OpusScript(SAMPLE_RATE, 1, OpusScript.Application.AUDIO);
+    this.encoder.setBitrate(OPUS_BITRATE);
+    this.pending = Buffer.alloc(0); // PCM que no llena una trama entera todavía
+  }
+
+  // Recibe PCM16 en base64 y devuelve las tramas Opus completas que salgan.
+  push(base64Pcm) {
+    const pcm = Buffer.from(base64Pcm, 'base64');
+    this.pending = this.pending.length ? Buffer.concat([this.pending, pcm]) : pcm;
+
+    const packets = [];
+    let offset = 0;
+    while (this.pending.length - offset >= OPUS_FRAME_BYTES) {
+      const frame = this.pending.subarray(offset, offset + OPUS_FRAME_BYTES);
+      packets.push(this.encoder.encode(frame, OPUS_FRAME_SAMPLES).toString('base64'));
+      offset += OPUS_FRAME_BYTES;
+    }
+    this.pending = offset ? this.pending.subarray(offset) : this.pending;
+    return packets;
+  }
+
+  // Al cerrar la frase quedan unas pocas muestras sueltas: se completan con
+  // silencio para que no se pierda la última sílaba.
+  flush() {
+    if (!this.pending.length) return [];
+    const frame = Buffer.alloc(OPUS_FRAME_BYTES);
+    this.pending.copy(frame);
+    this.pending = Buffer.alloc(0);
+    return [this.encoder.encode(frame, OPUS_FRAME_SAMPLES).toString('base64')];
+  }
+
+  close() {
+    this.pending = Buffer.alloc(0);
+    try { this.encoder.delete(); } catch { /* ya liberado */ }
+  }
+}
+
 const rooms = new Map();
 
 // Códigos cortos, legibles por teléfono y no adivinables. Sin vocales, para que
@@ -626,14 +682,24 @@ function normalizeRoomId(raw) {
 }
 
 class Room {
-  constructor(id, { label = '', minutes = ROOM_DEFAULT_MINUTES, maxPeers = ROOM_DEFAULT_MAX_PEERS } = {}) {
+  constructor(id, {
+    label = '',
+    minutes = ROOM_DEFAULT_MINUTES,
+    maxPeers = ROOM_DEFAULT_MAX_PEERS,
+    maxSpeakers = ROOM_DEFAULT_MAX_SPEAKERS,
+  } = {}) {
     this.id = id;
     this.label = label;
     this.peers = new Map();
     this.createdAt = Date.now();
     this.expiresAt = Date.now() + minutes * 60 * 1000;
     this.maxPeers = maxPeers;
+    this.maxSpeakers = maxSpeakers;
     this.usedMs = 0;
+  }
+
+  speakers() {
+    return [...this.peers.values()].filter((p) => p.hasMic);
   }
 
   get expired() { return Date.now() > this.expiresAt; }
@@ -657,6 +723,8 @@ class Room {
       peers: this.roster(),
       peerCount: this.peers.size,
       maxPeers: this.maxPeers,
+      maxSpeakers: this.maxSpeakers,
+      speaking: this.speakers().map((p) => p.name),
       minutesUsed: +(this.usedMs / 60000).toFixed(2),
       minutesLeft: Math.max(0, Math.round((this.expiresAt - Date.now()) / 60000)),
       expired: this.expired,
@@ -677,15 +745,28 @@ class Room {
   }
 
   // Entrega a quienes escuchan en `lang`, nunca al propio hablante.
+  // El JSON se arma UNA vez, no una por oyente: con 50 personas en la sala eso
+  // era serializar el mismo trozo de audio 50 veces por cada 43 ms.
   sendToListeners(lang, speaker, data) {
+    let payload = null;
     for (const peer of this.peers.values()) {
       if (peer === speaker || peer.listenLang !== lang) continue;
-      peer.send(data);
+      if (payload === null) payload = JSON.stringify(data);
+      peer.sendRaw(payload);
     }
   }
 
+  listenersOf(lang, speaker) {
+    const list = [];
+    for (const peer of this.peers.values()) {
+      if (peer !== speaker && peer.listenLang === lang) list.push(peer);
+    }
+    return list;
+  }
+
   broadcast(data) {
-    for (const peer of this.peers.values()) peer.send(data);
+    const payload = JSON.stringify(data);
+    for (const peer of this.peers.values()) peer.sendRaw(payload);
   }
 
   roster() {
@@ -694,6 +775,7 @@ class Room {
       name: p.name,
       speakLang: p.speakLang,
       listenLang: p.listenLang,
+      hasMic: p.hasMic,
     }));
   }
 }
@@ -707,10 +789,68 @@ class RoomPeer {
     this.speakLang = speakLang;
     this.listenLang = listenLang;
     this.translators = new Map(); // targetLang -> TranslatorSession
+    // Se entra en silencio. Sin esto, 50 asistentes con el micrófono abierto
+    // abrirían 50 sesiones de traducción con sus toses y sus conversaciones
+    // de al lado: caos para quien escucha y la factura multiplicada por 50.
+    this.hasMic = false;
+    this.micAudioAt = 0;
+    this.wantsOpus = false;             // lo dice el cliente al entrar
+    this.opusStreams = new Map();       // targetLang -> OpusStream
+  }
+
+  // Reparte un trozo de audio traducido: comprimido a quien sepa, PCM al resto.
+  // La compresión se hace UNA vez por idioma, no una por oyente.
+  sendAudioToListeners(lang, base64Pcm) {
+    const listeners = this.room.listenersOf(lang, this);
+    if (!listeners.length) return;
+
+    const conOpus = listeners.filter((p) => p.wantsOpus);
+    const sinOpus = listeners.filter((p) => !p.wantsOpus);
+
+    if (sinOpus.length) {
+      const payload = JSON.stringify({ type: 'audio', codec: 'pcm', chunk: base64Pcm, from: this.id });
+      for (const peer of sinOpus) peer.sendRaw(payload);
+    }
+
+    if (conOpus.length) {
+      for (const packet of this.opusStreamFor(lang).push(base64Pcm)) {
+        const payload = JSON.stringify({ type: 'audio', codec: 'opus', chunk: packet, from: this.id });
+        for (const peer of conOpus) peer.sendRaw(payload);
+      }
+    }
+  }
+
+  opusStreamFor(lang) {
+    let stream = this.opusStreams.get(lang);
+    if (!stream) {
+      stream = new OpusStream();
+      this.opusStreams.set(lang, stream);
+    }
+    return stream;
+  }
+
+  // Cierra la trama a medias que quede al terminar la frase.
+  flushOpus(lang) {
+    const stream = this.opusStreams.get(lang);
+    if (!stream) return;
+    const conOpus = this.room.listenersOf(lang, this).filter((p) => p.wantsOpus);
+    for (const packet of stream.flush()) {
+      const payload = JSON.stringify({ type: 'audio', codec: 'opus', chunk: packet, from: this.id });
+      for (const peer of conOpus) peer.sendRaw(payload);
+    }
+  }
+
+  closeOpus() {
+    for (const stream of this.opusStreams.values()) stream.close();
+    this.opusStreams.clear();
   }
 
   send(data) {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(data));
+    this.sendRaw(JSON.stringify(data));
+  }
+
+  sendRaw(payload) {
+    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(payload);
   }
 
   // El primer traductor es el que devuelve al hablante su propia transcripción
@@ -731,11 +871,11 @@ class RoomPeer {
         type: 'error',
         message: 'Se alcanzó el límite de uso de hoy. La traducción se ha detenido.',
       }),
-      onAudioDelta: (chunk) =>
-        this.room.sendToListeners(lang, this, { type: 'audio', chunk, from: this.id }),
+      onAudioDelta: (chunk) => this.sendAudioToListeners(lang, chunk),
       onOutputDelta: (_delta, _itemId, full) =>
         this.room.sendToListeners(lang, this, { type: 'partial', text: full, from: this.id, name: this.name }),
       onPhraseEnd: ({ original, translation }) => {
+        this.flushOpus(lang); // no dejar la última trama a medias
         if (translation) {
           this.room.sendToListeners(lang, this, { type: 'final', text: translation, from: this.id, name: this.name });
         }
@@ -759,6 +899,9 @@ class RoomPeer {
       if (!targets.has(lang)) {
         translator.dispose();
         this.translators.delete(lang);
+        // Ese idioma ya no tiene oyentes: liberar también su codificador.
+        this.opusStreams.get(lang)?.close();
+        this.opusStreams.delete(lang);
       }
     }
     for (const lang of targets) this.ensureTranslator(lang);
@@ -771,8 +914,23 @@ class RoomPeer {
   dispose() {
     for (const translator of this.translators.values()) translator.dispose();
     this.translators.clear();
+    this.closeOpus(); // libera la memoria del codificador
   }
 }
+
+// Suelta la palabra y apaga las sesiones de traducción de quien la tenía, para
+// que un micrófono olvidado no siga costando dinero.
+function releaseMic(peer, reason) {
+  if (!peer.hasMic) return;
+  peer.hasMic = false;
+  peer.dispose();
+  peer.send({ type: 'mic_released', message: reason });
+  peer.room.broadcast({ type: 'peers', peers: peer.room.roster() });
+  console.log(`[${peer.room.id}] 🔇 ${peer.name} suelta la palabra${reason ? ` (${reason})` : ''}`);
+}
+
+// Micrófono abierto pero callado: se suelta solo para no bloquear el turno.
+const MIC_IDLE_MS = 90 * 1000;
 
 roomWss.on('connection', (ws, req) => {
   let peer = null;
@@ -811,6 +969,8 @@ roomWss.on('connection', (ws, req) => {
       speakLang: msg.speakLang || 'es',
       listenLang: msg.listenLang || 'es',
     });
+    // El cliente dice qué sabe descomprimir. Sin WebCodecs se le manda PCM.
+    peer.wantsOpus = Array.isArray(msg.codecs) && msg.codecs.includes('opus');
     room.peers.set(peer.id, peer);
     console.log(`[${roomId}] + ${peer.name} (habla ${peer.speakLang}, escucha ${peer.listenLang}) — ${room.peers.size} en sala`);
 
@@ -835,7 +995,39 @@ roomWss.on('connection', (ws, req) => {
         peer.room.broadcast({ type: 'peers', peers: peer.room.roster() });
         break;
 
+      case 'request_mic': {
+        if (peer.hasMic) break;
+        const speaking = peer.room.speakers();
+        if (speaking.length >= peer.room.maxSpeakers) {
+          peer.send({
+            type: 'mic_denied',
+            message: speaking.length === 1
+              ? `${speaking[0].name} está hablando. Espera a que termine.`
+              : `Ya hay ${speaking.length} personas hablando. Espera tu turno.`,
+          });
+          break;
+        }
+        peer.hasMic = true;
+        peer.micAudioAt = Date.now();
+        peer.send({ type: 'mic_granted' });
+        peer.room.broadcast({ type: 'peers', peers: peer.room.roster() });
+        console.log(`[${peer.room.id}] 🎙️ ${peer.name} toma la palabra`);
+        break;
+      }
+
+      case 'release_mic':
+        releaseMic(peer);
+        break;
+
+      // Red de seguridad: si al cliente le falla el descompresor en marcha,
+      // pide volver a PCM en vez de quedarse sin oír nada.
+      case 'set_codec':
+        peer.wantsOpus = msg.codec === 'opus';
+        console.log(`[${peer.room.id}] ${peer.name} → audio en ${peer.wantsOpus ? 'opus' : 'pcm'}`);
+        break;
+
       case 'speech_start':
+        if (!peer.hasMic) break;
         // Abrir aquí (y no al entrar) evita pagar sesiones de quien solo escucha.
         peer.syncTranslators();
         // Sin esto, quien deja los idiomas por defecto habla al vacío y cree
@@ -851,12 +1043,17 @@ roomWss.on('connection', (ws, req) => {
         break;
 
       case 'audio_chunk':
+        // LA guarda de coste: sin la palabra, el audio ni se mira. Da igual lo
+        // que mande el navegador; aquí no se gasta un céntimo.
+        if (!peer.hasMic) break;
+        peer.micAudioAt = Date.now();
         // Red de seguridad por si llega audio sin un 'speech_start' previo.
         if (peer.translators.size === 0) peer.syncTranslators();
         peer.appendAudio(msg.audio);
         break;
 
       case 'speech_end':
+        if (!peer.hasMic) break;
         // Cola de silencio para que el modelo cierre el turno y no se coma el
         // final de la frase. Las sesiones se duermen solas más tarde.
         for (const translator of peer.translators.values()) translator.endTurn();
@@ -918,7 +1115,12 @@ app.get('/admin/api/state', requireAdmin, (_req, res) => {
       remainingMinutes: +(billing.remainingMs() / 60000).toFixed(2),
       day: billing.day,
     },
-    defaults: { minutes: ROOM_DEFAULT_MINUTES, maxPeers: ROOM_DEFAULT_MAX_PEERS },
+    defaults: {
+      minutes: ROOM_DEFAULT_MINUTES,
+      maxPeers: ROOM_DEFAULT_MAX_PEERS,
+      maxSpeakers: ROOM_DEFAULT_MAX_SPEAKERS,
+      peersHardCap: ROOM_PEERS_HARD_CAP,
+    },
   });
 });
 
@@ -937,12 +1139,13 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
   }
 
   const minutes = Math.min(480, Math.max(5, Number(req.body?.minutes) || ROOM_DEFAULT_MINUTES));
-  const maxPeers = Math.min(16, Math.max(2, Number(req.body?.maxPeers) || ROOM_DEFAULT_MAX_PEERS));
+  const maxPeers = Math.min(ROOM_PEERS_HARD_CAP, Math.max(2, Number(req.body?.maxPeers) || ROOM_DEFAULT_MAX_PEERS));
+  const maxSpeakers = Math.min(6, Math.max(1, Number(req.body?.maxSpeakers) || ROOM_DEFAULT_MAX_SPEAKERS));
   const label = String(req.body?.label || '').slice(0, 60);
 
-  const room = new Room(code, { label, minutes, maxPeers });
+  const room = new Room(code, { label, minutes, maxPeers, maxSpeakers });
   rooms.set(code, room);
-  console.log(`[admin] Sala creada "${code}" — ${minutes} min, hasta ${maxPeers} personas`);
+  console.log(`[admin] Sala creada "${code}" — ${minutes} min, ${maxPeers} personas, ${maxSpeakers} micrófonos`);
   res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });
 });
 
@@ -955,10 +1158,20 @@ app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
 
 app.get('/admin', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
 
-// Cierra sola cualquier sala que haya pasado de su hora.
+// Cierra las salas caducadas y libera los micrófonos abiertos que llevan rato
+// en silencio (alguien pulsó "Hablar" y se fue).
 function sweepRooms() {
+  const now = Date.now();
   for (const room of [...rooms.values()]) {
-    if (room.expired) room.close('La sala ha caducado.');
+    if (room.expired) {
+      room.close('La sala ha caducado.');
+      continue;
+    }
+    for (const peer of room.speakers()) {
+      if (now - peer.micAudioAt > MIC_IDLE_MS) {
+        releaseMic(peer, 'sin hablar durante un rato');
+      }
+    }
   }
 }
 setInterval(sweepRooms, 30000);
