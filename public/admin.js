@@ -29,6 +29,65 @@ async function api(path, options = {}) {
   return data;
 }
 
+// ── Idiomas permitidos ────────────────────────────────────────────────────────
+// Se eligen marcándolos, no escribiéndolos: un dedazo aquí sale caro. Cada
+// idioma extra es otra sesión de traducción por cada persona que hable, así
+// que se avisa del multiplicador en el momento.
+
+const LANGS_STORE = 'positivos-admin-langs';
+const PRESELECCION = ['es', 'pt'];
+
+function idiomasElegidos() {
+  return [...document.querySelectorAll('#langs input:checked')].map((i) => i.value);
+}
+
+function refreshLangsHint() {
+  const elegidos = idiomasElegidos();
+  const hint = el('langsHint');
+
+  if (elegidos.length === 0) {
+    hint.className = 'muted warnbox';
+    hint.innerHTML = '<b>Sin marcar nada, cada persona elige el idioma que quiera.</b> '
+      + 'En una sala grande eso puede multiplicar el coste varias veces. Marca los que vayáis a usar.';
+    return;
+  }
+  if (elegidos.length === 1) {
+    hint.className = 'muted warnbox';
+    hint.innerHTML = 'Con un solo idioma no hay nada que traducir: todos escucharían el original. Marca al menos dos.';
+    return;
+  }
+
+  // Quien habla necesita una sesión por cada OTRO idioma que se escuche.
+  const multiplicador = elegidos.length - 1;
+  const nombres = elegidos.map(langName).join(', ');
+  hint.className = 'muted';
+  hint.innerHTML = `<b>${nombres}.</b> Cada minuto que alguien hable cuesta `
+    + `<b>${multiplicador} ${multiplicador === 1 ? 'minuto' : 'minutos'}</b> de traducción`
+    + (multiplicador === 1 ? '.' : `, porque hay que traducirlo a ${multiplicador} idiomas a la vez.`)
+    + ' No depende de cuánta gente haya.';
+}
+
+function renderLangChips() {
+  let guardados;
+  try { guardados = JSON.parse(localStorage.getItem(LANGS_STORE)); } catch { /* incógnito */ }
+  const marcados = Array.isArray(guardados) ? guardados : PRESELECCION;
+
+  el('langs').innerHTML = LANGUAGES.map((l) => `
+    <label class="chip${marcados.includes(l.code) ? ' on' : ''}">
+      <input type="checkbox" value="${l.code}"${marcados.includes(l.code) ? ' checked' : ''}>
+      <span class="tick">✓</span>${esc(l.name)}
+    </label>`).join('');
+
+  for (const input of document.querySelectorAll('#langs input')) {
+    input.onchange = () => {
+      input.closest('.chip').classList.toggle('on', input.checked);
+      try { localStorage.setItem(LANGS_STORE, JSON.stringify(idiomasElegidos())); } catch { /* incógnito */ }
+      refreshLangsHint();
+    };
+  }
+  refreshLangsHint();
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderBudget(budget) {
@@ -105,7 +164,7 @@ async function createRoom() {
         minutes: Number(el('minutes').value),
         maxPeers: Number(el('maxPeers').value),
         maxSpeakers: Number(el('maxSpeakers').value),
-        langs: el('langs').value,
+        langs: idiomasElegidos().join(','),
       }),
     });
     el('label').value = '';
@@ -151,6 +210,7 @@ async function unlock(candidate) {
   try { localStorage.setItem(KEY_STORE, candidate); } catch { /* incógnito */ }
   el('gate').style.display = 'none';
   el('panel').style.display = 'block';
+  renderLangChips();
   refresh();
   timer = setInterval(refresh, 5000); // el consumo se mueve mientras hablan
   return true;

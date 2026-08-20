@@ -43,6 +43,17 @@
     .msg.ok  { background: rgba(74,222,128,.12); border: 1px solid rgba(74,222,128,.3); color: #86efac; }
     .msg code { display: block; margin-top: 8px; background: rgba(0,0,0,.35); padding: 10px;
       border-radius: 8px; color: #8fd6ff; overflow-x: auto; white-space: nowrap; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { display: inline-flex; align-items: center; gap: 7px; background: rgba(255,255,255,.07);
+      border: 1px solid rgba(255,255,255,.14); border-radius: 999px; padding: 9px 15px;
+      cursor: pointer; font-size: 13.5px; user-select: none; transition: all .12s; }
+    .chip:hover { border-color: rgba(255,255,255,.3); }
+    .chip input { display: none; }
+    .chip .tick { opacity: 0; font-size: 11px; }
+    .chip.on { background: rgba(74,222,128,.18); border-color: rgba(74,222,128,.5); color: #d9ffe6; }
+    .chip.on .tick { opacity: 1; }
+    .warnbox { background: rgba(250,204,21,.1); border: 1px solid rgba(250,204,21,.3);
+      border-radius: 8px; padding: 10px 12px; color: #fde68a; }
     #gate { max-width: 420px; margin: 60px auto; }
     #panel { display: none; }
   </style>
@@ -95,11 +106,13 @@
             <div class="muted" style="margin-bottom:6px">Micrófonos a la vez</div>
             <input id="maxSpeakers" type="number" min="1" max="6" value="2">
           </div>
-          <div class="col" style="flex:0 1 150px">
-            <div class="muted" style="margin-bottom:6px">Idiomas permitidos</div>
-            <input id="langs" type="text" placeholder="es, pt" value="es, pt">
-          </div>
           <button id="create">Crear sala</button>
+        </div>
+
+        <div style="margin-top:18px">
+          <div class="muted" style="margin-bottom:8px">Idiomas permitidos</div>
+          <div class="chips" id="langs"></div>
+          <div class="muted" id="langsHint" style="margin-top:10px"></div>
         </div>
         <div class="muted" style="margin-top:12px">
           El código se genera al azar para que nadie pueda adivinarlo, y la sala se cierra sola al agotar los minutos.
@@ -107,8 +120,7 @@
           personas puede tener la palabra al mismo tiempo. Para una charla con turno de preguntas, 2 va bien.
           <br><br>
           <b>Idiomas permitidos</b> es el tope de gasto más importante en salas grandes: cada idioma de escucha
-          distinto es <i>otra</i> sesión de traducción completa. Si lo dejas en <code>es, pt</code>, nadie puede
-          elegir un tercero y el coste no se te dispara. Vacío = cada quien elige lo que quiera.
+          distinto es <i>otra</i> sesión de traducción completa, así que marca solo los que vayáis a usar de verdad.
         </div>
       </div>
 
