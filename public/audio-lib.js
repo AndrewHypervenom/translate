@@ -63,12 +63,18 @@ class PCMPlayer {
 
   // Punto común de reproducción: por aquí entran tanto el PCM como lo que sale
   // del descompresor de Opus, así la cola y el encadenado son los mismos.
-  feedSamples(channel) {
+  //
+  // El `sampleRate` NO se puede dar por supuesto: Opus trabaja por dentro a
+  // 48 kHz y el navegador entrega las muestras a esa frecuencia aunque se le
+  // pida 24 kHz. Tratarlas como de 24 kHz reproduce el doble de lento y una
+  // octava más grave. El navegador remuestrea solo si el buffer declara bien
+  // su frecuencia.
+  feedSamples(channel, sampleRate = PCM_SAMPLE_RATE) {
     if (this.ctx.state === 'suspended') this.ctx.resume();
     const samples = channel.length;
     if (!samples) return;
 
-    const buf = this.ctx.createBuffer(1, samples, PCM_SAMPLE_RATE);
+    const buf = this.ctx.createBuffer(1, samples, sampleRate);
     buf.getChannelData(0).set(channel);
 
     const src = this.ctx.createBufferSource();
@@ -84,7 +90,7 @@ class PCMPlayer {
       this.nextTime = now + 0.01;
     }
     src.start(this.nextTime);
-    this.nextTime += samples / PCM_SAMPLE_RATE;
+    this.nextTime += samples / sampleRate; // duración real, no la supuesta
   }
 
   // Milisegundos de audio aún encolado.
@@ -134,7 +140,10 @@ class OpusPlayer {
         try {
           const samples = new Float32Array(audioData.numberOfFrames);
           audioData.copyTo(samples, { planeIndex: 0, format: 'f32-planar' });
-          this.pcm.feedSamples(samples);
+          // Se usa la frecuencia REAL que devuelve el descompresor: Opus suele
+          // entregar a 48 kHz aunque se configure a 24, y darlo por supuesto
+          // hace que la voz suene grave y a cámara lenta.
+          this.pcm.feedSamples(samples, audioData.sampleRate || PCM_SAMPLE_RATE);
         } finally {
           audioData.close(); // sin esto se acumula memoria del descompresor
         }
@@ -202,14 +211,26 @@ class VoiceGate {
     holdMs = 600,
     absFloor = 0.006,
     openFactor = 3.0,
-    closeFactor = 1.6,
+    closeFactor = 2.0,
     noiseDoublingMs = 1000,
+    // TOPE del piso de ruido. Es LA protección contra quedarse sordo: sin él,
+    // en una sala con ruido el umbral trepa pegado a la propia voz hasta
+    // superarla y el micrófono deja de oír para siempre, por mucho que hables.
+    // Atado al umbral absoluto: la parte adaptativa puede como mucho triplicar
+    // el mínimo, nunca subir hasta tapar una voz floja.
+    maxNoiseFloor = absFloor,
+    // Nadie habla 20 s sin una sola pausa: si la puerta lleva tanto abierta es
+    // ruido constante. Se cierra para que el modelo reciba el fin de turno —
+    // sin él se queda sin la señal de cerrar la frase y pierde el hilo.
+    maxOpenMs = 20000,
   } = {}) {
     this.prerollFrames = Math.max(1, Math.round(prerollMs / frameMs));
     this.holdFrames = Math.max(1, Math.round(holdMs / frameMs));
+    this.maxOpenFrames = Math.max(1, Math.round(maxOpenMs / frameMs));
     this.absFloor = absFloor;
     this.openFactor = openFactor;
     this.closeFactor = closeFactor;
+    this.maxNoiseFloor = maxNoiseFloor;
     // Cuánto sube el piso de ruido por frame si el nivel nunca baja.
     this.noiseRise = Math.pow(2, frameMs / noiseDoublingMs);
 
@@ -217,6 +238,7 @@ class VoiceGate {
     this.preroll = [];
     this.hold = 0;
     this.open = false;
+    this.openFrames = 0;
   }
 
   // Devuelve { frames, level, started, ended }. `frames` son los Float32Array
@@ -228,10 +250,11 @@ class VoiceGate {
     const voiced = this.open ? level > closeAt : level > openAt;
 
     // Se actualiza SIEMPRE, también con la puerta abierta: si no, un ruido
-    // constante la abre una vez y ya no se cierra jamás.
+    // constante la abre una vez y ya no se cierra jamás. El tope es lo que
+    // impide que, de tanto subir, acabe por encima de la voz.
     this.noiseFloor = Math.min(
       Math.max(0.0005, Math.min(this.noiseFloor * this.noiseRise, level)),
-      0.05
+      this.maxNoiseFloor
     );
 
     const frames = [];
@@ -241,17 +264,28 @@ class VoiceGate {
     if (voiced) {
       if (!this.open) {
         this.open = true;
+        this.openFrames = 0;
         started = true;
         frames.push(...this.preroll);
         this.preroll = [];
       }
       this.hold = this.holdFrames;
       frames.push(f32);
+
+      // Lleva demasiado abierta de un tirón: es ruido, no una frase. Se cierra
+      // el turno para que el modelo reciba su señal de fin y no pierda el hilo.
+      if (++this.openFrames >= this.maxOpenFrames) {
+        this.open = false;
+        this.hold = 0;
+        this.openFrames = 0;
+        ended = true;
+      }
     } else if (this.hold > 0) {
       this.hold--;
       frames.push(f32);
       if (this.hold === 0) {
         this.open = false;
+        this.openFrames = 0;
         ended = true;
       }
     } else {
@@ -266,5 +300,6 @@ class VoiceGate {
     this.preroll = [];
     this.hold = 0;
     this.open = false;
+    this.openFrames = 0;
   }
 }

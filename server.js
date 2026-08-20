@@ -151,7 +151,8 @@ const SESSION_MAX_MS = 8 * 60 * 1000; // vida máxima antes de reciclar por cont
 const SESSION_IDLE_MS = 30 * 1000;    // sin audio → dormir la sesión (y no pagarla)
 const SILENCE_SETTLE_MS = 1200;       // silencio mínimo para reciclar sin cortar a nadie
 const MAX_QUEUED_CHUNKS = 120;        // ~10 s de audio retenido mientras (re)conecta
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = 5;   // reintentos rápidos antes de bajar el ritmo
+const SLOW_RECONNECT_MS = 15000;    // luego se sigue intentando, sin rendirse nunca
 
 // El modelo cierra la frase cuando su VAD oye silencio. Si el audio termina en
 // seco —que es justo lo que pasa con un VAD en el cliente, que deja de enviar—
@@ -389,13 +390,21 @@ class TranslatorSession {
 
   scheduleReconnect() {
     if (this.disposed || this.reconnectTimer) return;
-    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      this.on.onError?.('No se pudo restablecer la conexión con OpenAI. Detén y vuelve a iniciar la traducción.');
-      return;
+
+    // NUNCA se deja de reintentar. Antes se rendía tras unos intentos y la sala
+    // se quedaba muda para siempre: la gente seguía hablando y no salía nada,
+    // sin manera de recuperarlo salvo volver a entrar. Tras los primeros
+    // intentos rápidos se sigue probando despacio, que no molesta y recupera
+    // solo en cuanto OpenAI vuelva.
+    const rapidos = this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS;
+    if (!rapidos && this.reconnectAttempts === MAX_RECONNECT_ATTEMPTS) {
+      this.on.onError?.('Problemas de conexión con OpenAI. Se sigue reintentando; no hace falta que hagas nada.');
     }
-    const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 8000);
+    const delay = rapidos
+      ? Math.min(1000 * 2 ** this.reconnectAttempts, 8000)
+      : SLOW_RECONNECT_MS;
     this.reconnectAttempts++;
-    console.log(`[${this.label}] Reintentando en ${delay} ms (${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+    console.log(`[${this.label}] Reintentando en ${delay} ms (intento ${this.reconnectAttempts})`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

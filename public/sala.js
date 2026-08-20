@@ -365,6 +365,24 @@ function releaseMic() {
   setStatus('En la sala — estás escuchando', 'live');
 }
 
+// Si el micrófono capta sonido pero el detector de voz no lo deja pasar, la
+// persona habla y no sale nada — y desde su lado no hay forma de saberlo. Se
+// avisa en vez de dejarla a ciegas.
+let framesConSonido = 0;
+let framesEnviados = 0;
+
+function watchMicHealth(level, seEnvio) {
+  if (level > 0.01) framesConSonido++;
+  if (seEnvio) framesEnviados++;
+
+  // ~5 s de sonido sin que nada llegue a enviarse.
+  if (framesConSonido > 120 && framesEnviados === 0) {
+    el.micHint.textContent = 'Te capto sonido pero no reconozco voz. Acércate al micrófono, sube su volumen en el sistema o prueba con otro.';
+    framesConSonido = 0;
+  }
+  if (framesEnviados > 0) { framesConSonido = 0; framesEnviados = 0; }
+}
+
 function onAudioFrame(e) {
   const f32 = e.inputBuffer.getChannelData(0);
   if (!hasMic) return; // pedida pero aún no concedida: no se manda nada
@@ -380,6 +398,7 @@ function onAudioFrame(e) {
 
   const { frames, level, started, ended } = gate.push(f32);
   el.meter.style.width = Math.min(100, level * 400) + '%';
+  watchMicHealth(level, frames.length > 0);
 
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (started) send({ type: 'speech_start' });
