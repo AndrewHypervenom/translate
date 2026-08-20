@@ -160,6 +160,7 @@ async function createRoom() {
     const room = await api('/rooms', {
       method: 'POST',
       body: JSON.stringify({
+        code: el('code').value.trim(), // vacío = al azar
         label: el('label').value.trim(),
         minutes: Number(el('minutes').value),
         maxPeers: Number(el('maxPeers').value),
@@ -168,6 +169,7 @@ async function createRoom() {
       }),
     });
     el('label').value = '';
+    el('code').value = '';
     show('ok', `Sala creada. Comparte este enlace:<code>${esc(room.url)}</code>`);
     await copyLink(room.code);
     refresh();

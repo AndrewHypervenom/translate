@@ -94,6 +94,10 @@
             <div class="muted" style="margin-bottom:6px">Para qué es (opcional)</div>
             <input id="label" type="text" placeholder="Reunión con Bruno" maxlength="60">
           </div>
+          <div class="col" style="flex:0 1 150px">
+            <div class="muted" style="margin-bottom:6px">Código (opcional)</div>
+            <input id="code" type="text" placeholder="al azar" maxlength="40" autocomplete="off">
+          </div>
           <div class="col" style="flex:0 1 110px">
             <div class="muted" style="margin-bottom:6px">Minutos</div>
             <input id="minutes" type="number" min="5" max="480" value="60">
@@ -115,7 +119,10 @@
           <div class="muted" id="langsHint" style="margin-top:10px"></div>
         </div>
         <div class="muted" style="margin-top:12px">
-          El código se genera al azar para que nadie pueda adivinarlo, y la sala se cierra sola al agotar los minutos.
+          Si dejas el <b>código</b> vacío se genera al azar, para que nadie pueda adivinarlo. Ponerle uno tuyo sirve
+          para <b>revivir un enlace ya repartido</b>: si la sala se cierra o el servidor se reinicia, la vuelves a
+          crear con el mismo código y los enlaces que ya diste siguen funcionando.
+          La sala se cierra sola al agotar los minutos.
           <b>Micrófonos a la vez</b> es tu tope de gasto simultáneo: todos entran escuchando y solo esa cantidad de
           personas puede tener la palabra al mismo tiempo. Para una charla con turno de preguntas, 2 va bien.
           <br><br>

@@ -191,7 +191,13 @@ async function enter() {
   el.toggle.className = 'stop';
   el.micCard.style.display = 'block';
   renderMicButton();
+  openSocket(roomId);
+}
 
+// `retomarMic`: si al caerse la conexión estábamos hablando, se vuelve a pedir
+// la palabra al reconectar para no dejar a alguien con el botón en rojo y el
+// micrófono mudo.
+function openSocket(roomId, retomarMic = false) {
   ws = new WebSocket(`${WS_URL}?room=${encodeURIComponent(roomId)}`);
   ws.onopen = () => {
     setStatus('Conectando a la sala…', 'wait');
@@ -203,13 +209,15 @@ async function enter() {
       listenLang: el.listenLang.value,
       codecs: useOpus ? ['opus'] : [], // sin WebCodecs el servidor manda PCM
     });
+    if (retomarMic) send({ type: 'request_mic' });
   };
   ws.onclose = () => {
     // Si el servidor nos rechazó (sala inexistente, llena o caducada) ya mandó
     // el motivo antes de cerrar: no lo pisamos con un "conexión perdida".
     if (!active) return;
     if (rejected) { leave({ keepStatus: true }); return; }
-    setStatus('Conexión perdida — vuelve a entrar', 'err');
+    // Una caída de red no debería obligar a nadie a volver a entrar a mano.
+    scheduleRejoin();
   };
   ws.onmessage = ({ data }) => {
     let msg;
@@ -218,10 +226,32 @@ async function enter() {
   };
 }
 
+// Reconexión automática. Las caídas pasan (el móvil cambia de wifi a datos, el
+// proxy corta una conexión callada, el servidor se reinicia) y antes había que
+// volver a entrar a mano, que es justo lo que nadie hace en mitad de una charla.
+let rejoinTimer = null;
+let rejoinAttempts = 0;
+
+function scheduleRejoin() {
+  if (rejoinTimer || !active) return;
+  const delay = Math.min(1000 * 2 ** rejoinAttempts, 10000);
+  rejoinAttempts++;
+  setStatus(`Conexión perdida — reconectando…`, 'wait');
+  rejoinTimer = setTimeout(() => {
+    rejoinTimer = null;
+    if (!active) return;
+    const teniaMic = hasMic;
+    hasMic = false;
+    micPending = false;
+    openSocket(normalizeRoomId(el.room.value), teniaMic);
+  }, delay);
+}
+
 function handleMessage(msg) {
   switch (msg.type) {
     case 'joined':
       myPeerId = msg.peerId;
+      rejoinAttempts = 0; // reconectó bien: el backoff vuelve a empezar
       applyRoomLangs(msg);
       setStatus(`En la sala "${msg.room}" — estás escuchando`, 'live');
       renderPeers(msg.peers);
@@ -408,6 +438,8 @@ function leave({ keepStatus = false } = {}) {
   active = false;
   hasMic = false;
   micPending = false;
+  if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
+  rejoinAttempts = 0;
   stopCapture();
   for (const player of players.values()) player.close?.();
   players.clear();

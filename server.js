@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const OpusScript = require('opusscript');
@@ -730,6 +731,7 @@ class Room {
     }
     this.peers.clear();
     rooms.delete(this.id);
+    saveState();
     console.log(`[${this.id}] Sala cerrada: ${reason}`);
   }
 
@@ -1216,6 +1218,7 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
 
   const room = new Room(code, { label, minutes, maxPeers, maxSpeakers, langs });
   rooms.set(code, room);
+  saveState();
   console.log(`[admin] Sala creada "${code}" — ${minutes} min, ${maxPeers} personas, ${maxSpeakers} micrófonos`);
   res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });
 });
@@ -1228,6 +1231,66 @@ app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
 });
 
 app.get('/admin', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
+
+// ── Persistencia ──────────────────────────────────────────────────────────────
+// Las salas vivían solo en memoria: bastaba que Render reiniciara el servicio
+// —al dormirse por inactividad, al desplegar o por un fallo— para que se
+// borraran TODAS y los enlaces ya repartidos dejaran de funcionar, sin más
+// remedio que crear una sala nueva. También se guarda el gasto del día, o el
+// tope diario se reiniciaría solo con reiniciar.
+const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'estado-salas.json');
+let saveTimer = null;
+
+function saveState() {
+  // Se agrupa: no tiene sentido escribir el fichero en cada cambio suelto.
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const data = {
+      billing: { day: billing.day, usedMs: billing.usedMs },
+      rooms: [...rooms.values()].map((r) => ({
+        id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
+        maxPeers: r.maxPeers, maxSpeakers: r.maxSpeakers, langs: r.langs, usedMs: r.usedMs,
+      })),
+    };
+    fs.writeFile(STATE_FILE, JSON.stringify(data), (err) => {
+      if (err) console.error('[Estado] No se pudo guardar:', err.message);
+    });
+  }, 1000);
+}
+
+function loadState() {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return; // primera vez o fichero ilegible: se empieza limpio
+  }
+
+  if (data.billing?.day === new Date().toISOString().slice(0, 10)) {
+    billing.usedMs = Number(data.billing.usedMs) || 0;
+  }
+
+  let recuperadas = 0;
+  for (const r of data.rooms || []) {
+    if (!r?.id || Date.now() > r.expiresAt) continue; // ya había caducado
+    const room = new Room(r.id, {
+      label: r.label,
+      minutes: (r.expiresAt - Date.now()) / 60000,
+      maxPeers: r.maxPeers,
+      maxSpeakers: r.maxSpeakers,
+      langs: Array.isArray(r.langs) ? r.langs : [],
+    });
+    room.createdAt = r.createdAt || Date.now();
+    room.expiresAt = r.expiresAt;
+    room.usedMs = Number(r.usedMs) || 0;
+    rooms.set(room.id, room);
+    recuperadas++;
+  }
+  if (recuperadas) {
+    console.log(`[Estado] ${recuperadas} sala(s) recuperadas tras el reinicio — los enlaces siguen sirviendo`);
+  }
+}
 
 // Cierra las salas caducadas y libera los micrófonos abiertos que llevan rato
 // en silencio (alguien pulsó "Hablar" y se fue).
@@ -1311,6 +1374,31 @@ app.get('/privacy', (_req, res) => {
 </html>`);
 });
 
+// ── Latido de las conexiones ──────────────────────────────────────────────────
+// Un WebSocket por el que no pasa nada durante un rato lo cierran los
+// intermediarios (el proxy de Render, routers, NAT…). Le pasa justo a quien
+// solo escucha: como no habla, no le llega ni le sale nada y lo desconectan
+// "sin motivo". Un ping cada 25 s mantiene la conexión viva, y de paso permite
+// detectar y limpiar las que ya están muertas.
+const HEARTBEAT_MS = 25000;
+
+function keepAlive(wsServer) {
+  wsServer.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+  });
+  setInterval(() => {
+    for (const ws of wsServer.clients) {
+      if (ws.isAlive === false) { ws.terminate(); continue; }
+      ws.isAlive = false;
+      try { ws.ping(); } catch { /* se está cerrando */ }
+    }
+  }, HEARTBEAT_MS);
+}
+
+keepAlive(wss);
+keepAlive(roomWss);
+
 // ── Ruteo de upgrades WebSocket por ruta ──────────────────────────────────────
 
 server.on('upgrade', (req, socket, head) => {
@@ -1335,6 +1423,8 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 console.log('[Motor] gpt-realtime-translate — solo traduce, conserva la voz del hablante');
+
+loadState(); // recupera las salas de antes del reinicio: los enlaces siguen valiendo
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {

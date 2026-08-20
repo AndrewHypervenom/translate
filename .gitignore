@@ -21,3 +21,7 @@ _ext_tmp/
 positivo1024.jpg
 image.png
 logo.jpg
+
+# Estado de las salas (se regenera solo)
+estado-salas.json
+estado-prueba.json
