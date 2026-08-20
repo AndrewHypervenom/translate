@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PositivoS+ En Vivo — traducción de voz en tiempo real</title>
+  <meta name="description" content="Crea una sala, comparte el enlace y que cada persona hable y escuche en su propio idioma.">
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0; min-height: 100vh; background: linear-gradient(135deg,#1a1a2e,#2d2d54);
+      color: #fff; padding: 24px; display: flex; align-items: center; justify-content: center; }
+    .wrap { max-width: 560px; width: 100%; text-align: center; }
+    h1 { font-size: 30px; margin: 0 0 10px; }
+    p { color: #b8b8d8; line-height: 1.6; margin: 0 0 28px; }
+    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px; padding: 24px; text-align: left; }
+    .label { color: #9a9ac0; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    input { flex: 1 1 200px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
+      color: #fff; border-radius: 10px; padding: 14px; font-size: 16px; }
+    button { font-size: 15px; font-weight: 600; border: none; border-radius: 10px; padding: 14px 22px;
+      cursor: pointer; background: #4ade80; color: #06301a; }
+    button:hover { filter: brightness(1.08); }
+    .hint { color: #9a9ac0; font-size: 13px; margin-top: 14px; line-height: 1.5; }
+    footer { color: #6c6c92; font-size: 12px; margin-top: 24px; }
+    footer a { color: #8f8fc0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🗣️ PositivoS+ En Vivo</h1>
+    <p>Habla en tu idioma y que cada persona te escuche en el suyo, en tiempo real. Sin instalar nada.</p>
+
+    <div class="card">
+      <div class="label">Entra o crea una sala</div>
+      <form class="row" id="form">
+        <input id="room" type="text" placeholder="equipo-ventas" maxlength="40" autocomplete="off" required>
+        <button type="submit">Entrar</button>
+      </form>
+      <div class="hint">Elige cualquier nombre y compártelo. Quien abra el mismo enlace entra a tu sala.</div>
+    </div>
+
+    <footer><a href="/privacy">Privacidad</a></footer>
+  </div>
+
+  <script>
+    document.getElementById('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const code = document.getElementById('room').value
+        .trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
+      if (code) location.href = '/sala/' + code;
+    });
+  </script>
+</body>
+</html>

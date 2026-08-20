@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sala de conversación — PositivoS+ En Vivo</title>
+  <meta name="description" content="Habla en tu idioma y que cada persona te escuche en el suyo, en tiempo real. Sin instalar nada.">
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0; min-height: 100vh; background: linear-gradient(135deg,#1a1a2e,#2d2d54);
+      color: #fff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+    .wrap { max-width: 720px; width: 100%; }
+    h1 { font-size: 24px; margin: 4px 0; }
+    p.sub { color: #b8b8d8; margin: 6px 0 20px; line-height: 1.55; font-size: 15px; }
+    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px; padding: 20px; margin-bottom: 14px; }
+    .label { color: #9a9ac0; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .col { flex: 1 1 200px; min-width: 160px; }
+    input, select { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
+      color: #fff; border-radius: 10px; padding: 13px; font-size: 16px; }
+    select option { color: #000; }
+    button { font-size: 15px; font-weight: 600; border: none; border-radius: 10px; padding: 13px 20px;
+      cursor: pointer; background: #4ade80; color: #06301a; }
+    button:hover { filter: brightness(1.08); }
+    button.stop { background: #f87171; color: #3b0a0a; }
+    button.ghost { background: rgba(255,255,255,0.12); color: #fff; font-weight: 500; font-size: 13px; padding: 11px 14px; }
+    .status { display: flex; align-items: center; gap: 10px; font-size: 15px; margin-top: 14px; line-height: 1.4; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; background: #666; flex: none; }
+    .dot.live { background: #4ade80; animation: pulse 1.2s infinite; }
+    .dot.wait { background: #facc15; }
+    .dot.err  { background: #f87171; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    .meter { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: 12px; }
+    .meter > div { height: 100%; width: 0%; background: #4ade80; transition: width .08s linear; }
+    .share { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+    .share code { flex: 1 1 240px; background: rgba(0,0,0,.35); padding: 11px 12px; border-radius: 8px;
+      font-size: 13px; overflow-x: auto; white-space: nowrap; color: #8fd6ff; }
+    .peers { display: flex; flex-wrap: wrap; gap: 8px; }
+    .peer { background: rgba(255,255,255,0.09); border-radius: 999px; padding: 6px 14px; font-size: 13px; }
+    .peer .langs { color: #9a9ac0; }
+    .peer.me { background: rgba(74,222,128,0.18); }
+    .subs { min-height: 140px; max-height: 300px; overflow-y: auto; font-size: 19px; line-height: 1.5; }
+    .subs .line { margin-bottom: 12px; }
+    .subs .who { display: block; font-size: 12px; color: #8fd6ff; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px; }
+    .subs .partial { color: #c8c8e8; }
+    .self { color: #b8b8d8; font-size: 15px; min-height: 22px; }
+    .hint { color: #9a9ac0; font-size: 13px; margin-top: 10px; line-height: 1.5; }
+    footer { color: #6c6c92; font-size: 12px; text-align: center; margin: 8px 0 24px; }
+    footer a { color: #8f8fc0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🗣️ Sala de conversación</h1>
+    <p class="sub">Habla en tu idioma y cada persona te escucha en el suyo, en tiempo real. <b>No hay que instalar nada</b>: comparte el enlace y listo. Funciona en el móvil.</p>
+
+    <div class="card">
+      <div class="row">
+        <div class="col">
+          <div class="label">Tu nombre</div>
+          <input id="name" type="text" placeholder="Andrew" maxlength="40" autocomplete="name">
+        </div>
+        <div class="col">
+          <div class="label">Código de la sala</div>
+          <input id="room" type="text" placeholder="equipo-ventas" maxlength="40" autocomplete="off">
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="col">
+          <div class="label">Hablo en</div>
+          <select id="speakLang"></select>
+        </div>
+        <div class="col">
+          <div class="label">Escucho en</div>
+          <select id="listenLang"></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <button id="toggle">🎙️ Entrar y hablar</button>
+      </div>
+      <div class="status"><span class="dot" id="dot"></span><span id="statusText">Sin conectar</span></div>
+      <div class="meter"><div id="meter"></div></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Invita a quien quieras</div>
+      <div class="share">
+        <code id="shareLink">—</code>
+        <button id="copyBtn" class="ghost">Copiar enlace</button>
+      </div>
+      <div class="hint">Cualquiera con este enlace entra desde su navegador, elige su idioma y ya se entienden.</div>
+    </div>
+
+    <div class="card">
+      <div class="label">En la sala</div>
+      <div class="peers" id="peers"><span class="hint">Nadie todavía.</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Lo que dicen los demás (en tu idioma)</div>
+      <div class="subs" id="subs"></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Lo que se te entiende a ti</div>
+      <div class="self" id="self">—</div>
+      <label class="hint" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:14px">
+        <input type="checkbox" id="antiEcho" style="width:auto;margin-top:2px;flex:none">
+        <span><b>Estoy usando altavoces.</b> Silencia tu micrófono mientras suena la traducción de otra persona, para que no se realimente. Con auriculares déjalo sin marcar: así puedes interrumpir y hablar en cualquier momento.</span>
+      </label>
+    </div>
+
+    <footer>PositivoS+ En Vivo · <a href="/privacy">Privacidad</a></footer>
+  </div>
+
+  <script src="/langs.js"></script>
+  <script src="/audio-lib.js"></script>
+  <script src="/sala.js"></script>
+</body>
+</html>
