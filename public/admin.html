@@ -89,11 +89,15 @@
           </div>
           <div class="col" style="flex:0 1 110px">
             <div class="muted" style="margin-bottom:6px">Aforo</div>
-            <input id="maxPeers" type="number" min="2" max="60" value="4">
+            <input id="maxPeers" type="number" min="2" max="200" value="4">
           </div>
           <div class="col" style="flex:0 1 130px">
             <div class="muted" style="margin-bottom:6px">Micrófonos a la vez</div>
             <input id="maxSpeakers" type="number" min="1" max="6" value="2">
+          </div>
+          <div class="col" style="flex:0 1 150px">
+            <div class="muted" style="margin-bottom:6px">Idiomas permitidos</div>
+            <input id="langs" type="text" placeholder="es, pt" value="es, pt">
           </div>
           <button id="create">Crear sala</button>
         </div>
@@ -101,6 +105,10 @@
           El código se genera al azar para que nadie pueda adivinarlo, y la sala se cierra sola al agotar los minutos.
           <b>Micrófonos a la vez</b> es tu tope de gasto simultáneo: todos entran escuchando y solo esa cantidad de
           personas puede tener la palabra al mismo tiempo. Para una charla con turno de preguntas, 2 va bien.
+          <br><br>
+          <b>Idiomas permitidos</b> es el tope de gasto más importante en salas grandes: cada idioma de escucha
+          distinto es <i>otra</i> sesión de traducción completa. Si lo dejas en <code>es, pt</code>, nadie puede
+          elegir un tercero y el coste no se te dispara. Vacío = cada quien elige lo que quiera.
         </div>
       </div>
 

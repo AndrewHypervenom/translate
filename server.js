@@ -105,6 +105,8 @@ const ROOM_DEFAULT_MAX_PEERS = Number(process.env.ROOM_MAX_PEERS || 8);
 // Micrófonos abiertos a la vez. Es el tope real de gasto simultáneo de una sala.
 const ROOM_DEFAULT_MAX_SPEAKERS = Number(process.env.ROOM_MAX_SPEAKERS || 2);
 const ROOM_PEERS_HARD_CAP = Number(process.env.ROOM_PEERS_HARD_CAP || 60);
+// Por encima de esto se deja de mandar la lista completa de participantes.
+const ROSTER_FULL_LIMIT = Number(process.env.ROSTER_FULL_LIMIT || 25);
 const MAX_OPEN_ROOMS = Number(process.env.MAX_OPEN_ROOMS || 20);
 
 // Cuántos ms de audio representa un trozo en base64 de PCM16 mono a 24 kHz.
@@ -687,9 +689,15 @@ class Room {
     minutes = ROOM_DEFAULT_MINUTES,
     maxPeers = ROOM_DEFAULT_MAX_PEERS,
     maxSpeakers = ROOM_DEFAULT_MAX_SPEAKERS,
+    langs = [],
   } = {}) {
     this.id = id;
     this.label = label;
+    // Idiomas permitidos en la sala. Es el tope de gasto que más importa: cada
+    // idioma de escucha distinto es OTRA sesión de traducción completa. En una
+    // sala abierta, con que unos cuantos toqueteen el selector el coste se
+    // multiplica. Vacío = cualquiera puede elegir lo que quiera.
+    this.langs = langs;
     this.peers = new Map();
     this.createdAt = Date.now();
     this.expiresAt = Date.now() + minutes * 60 * 1000;
@@ -724,6 +732,7 @@ class Room {
       peerCount: this.peers.size,
       maxPeers: this.maxPeers,
       maxSpeakers: this.maxSpeakers,
+      langs: this.langs,
       speaking: this.speakers().map((p) => p.name),
       minutesUsed: +(this.usedMs / 60000).toFixed(2),
       minutesLeft: Math.max(0, Math.round((this.expiresAt - Date.now()) / 60000)),
@@ -777,6 +786,28 @@ class Room {
       listenLang: p.listenLang,
       hasMic: p.hasMic,
     }));
+  }
+
+  // Si la sala es grande, mandar la lista entera a todos cada vez que entra
+  // alguien es tráfico al cuadrado: con 150 personas eran 15 MB solo en listas,
+  // justo en el momento en que todos entran a la vez. Y una lista de 150
+  // nombres tampoco le sirve de nada a nadie. Por encima del límite se manda
+  // solo el recuento y quién tiene la palabra.
+  rosterMessage() {
+    if (this.peers.size <= ROSTER_FULL_LIMIT) {
+      return { type: 'peers', peers: this.roster() };
+    }
+    return {
+      type: 'peers',
+      count: this.peers.size,
+      speaking: this.speakers().map((p) => ({ id: p.id, name: p.name })),
+    };
+  }
+
+  // Ajusta un idioma a los permitidos en la sala.
+  clampLang(lang, fallback) {
+    if (!this.langs.length) return lang;
+    return this.langs.includes(lang) ? lang : (fallback || this.langs[0]);
   }
 }
 
@@ -925,7 +956,7 @@ function releaseMic(peer, reason) {
   peer.hasMic = false;
   peer.dispose();
   peer.send({ type: 'mic_released', message: reason });
-  peer.room.broadcast({ type: 'peers', peers: peer.room.roster() });
+  peer.room.broadcast(peer.room.rosterMessage());
   console.log(`[${peer.room.id}] 🔇 ${peer.name} suelta la palabra${reason ? ` (${reason})` : ''}`);
 }
 
@@ -966,16 +997,24 @@ roomWss.on('connection', (ws, req) => {
 
     peer = new RoomPeer(ws, room, {
       name: String(msg.name || 'Invitado').slice(0, 40),
-      speakLang: msg.speakLang || 'es',
-      listenLang: msg.listenLang || 'es',
+      speakLang: room.clampLang(msg.speakLang || 'es'),
+      listenLang: room.clampLang(msg.listenLang || 'es'),
     });
     // El cliente dice qué sabe descomprimir. Sin WebCodecs se le manda PCM.
     peer.wantsOpus = Array.isArray(msg.codecs) && msg.codecs.includes('opus');
     room.peers.set(peer.id, peer);
     console.log(`[${roomId}] + ${peer.name} (habla ${peer.speakLang}, escucha ${peer.listenLang}) — ${room.peers.size} en sala`);
 
-    send({ type: 'joined', peerId: peer.id, room: roomId, peers: room.roster() });
-    room.broadcast({ type: 'peers', peers: room.roster() });
+    send({
+      type: 'joined',
+      peerId: peer.id,
+      room: roomId,
+      peers: room.roster(),
+      langs: room.langs,               // el cliente limita sus selectores a estos
+      speakLang: peer.speakLang,       // pueden haberse ajustado a los permitidos
+      listenLang: peer.listenLang,
+    });
+    room.broadcast(room.rosterMessage());
   }
 
   ws.on('message', (raw) => {
@@ -989,11 +1028,15 @@ roomWss.on('connection', (ws, req) => {
     if (!peer) return; // todo lo demás exige haber entrado a la sala
 
     switch (msg.type) {
-      case 'set_langs':
-        if (msg.speakLang) peer.speakLang = msg.speakLang;
-        if (msg.listenLang) peer.listenLang = msg.listenLang;
-        peer.room.broadcast({ type: 'peers', peers: peer.room.roster() });
+      case 'set_langs': {
+        // Se ajusta a los idiomas de la sala: cada idioma extra es otra sesión
+        // de traducción, así que aquí es donde se contiene el gasto.
+        if (msg.speakLang) peer.speakLang = peer.room.clampLang(msg.speakLang, peer.speakLang);
+        if (msg.listenLang) peer.listenLang = peer.room.clampLang(msg.listenLang, peer.listenLang);
+        peer.send({ type: 'langs_set', speakLang: peer.speakLang, listenLang: peer.listenLang });
+        peer.room.broadcast(peer.room.rosterMessage());
         break;
+      }
 
       case 'request_mic': {
         if (peer.hasMic) break;
@@ -1010,7 +1053,7 @@ roomWss.on('connection', (ws, req) => {
         peer.hasMic = true;
         peer.micAudioAt = Date.now();
         peer.send({ type: 'mic_granted' });
-        peer.room.broadcast({ type: 'peers', peers: peer.room.roster() });
+        peer.room.broadcast(peer.room.rosterMessage());
         console.log(`[${peer.room.id}] 🎙️ ${peer.name} toma la palabra`);
         break;
       }
@@ -1069,7 +1112,7 @@ roomWss.on('connection', (ws, req) => {
     console.log(`[${room.id}] - ${peer.name} — ${room.peers.size} en sala`);
     // La sala NO se borra al quedarse vacía: sigue abierta hasta que caduque o
     // el administrador la cierre, para poder volver a entrar con el mismo enlace.
-    room.broadcast({ type: 'peers', peers: room.roster() });
+    room.broadcast(room.rosterMessage());
     peer = null;
   });
 });
@@ -1142,8 +1185,14 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
   const maxPeers = Math.min(ROOM_PEERS_HARD_CAP, Math.max(2, Number(req.body?.maxPeers) || ROOM_DEFAULT_MAX_PEERS));
   const maxSpeakers = Math.min(6, Math.max(1, Number(req.body?.maxSpeakers) || ROOM_DEFAULT_MAX_SPEAKERS));
   const label = String(req.body?.label || '').slice(0, 60);
+  // Lista blanca de idiomas: el tope de gasto más importante en salas grandes.
+  const langs = String(req.body?.langs || '')
+    .toLowerCase().split(/[,\s]+/).map((l) => l.trim())
+    .filter((l) => /^[a-z]{2}$/.test(l))
+    .filter((l, i, all) => all.indexOf(l) === i)
+    .slice(0, MAX_TARGET_LANGS_PER_SPEAKER + 1);
 
-  const room = new Room(code, { label, minutes, maxPeers, maxSpeakers });
+  const room = new Room(code, { label, minutes, maxPeers, maxSpeakers, langs });
   rooms.set(code, room);
   console.log(`[admin] Sala creada "${code}" — ${minutes} min, ${maxPeers} personas, ${maxSpeakers} micrófonos`);
   res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });

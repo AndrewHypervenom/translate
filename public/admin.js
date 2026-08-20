@@ -72,7 +72,8 @@ function roomRow(room) {
         ${room.label ? `<span class="who">${esc(room.label)}</span>` : ''}
       </td>
       <td>${room.peerCount}/${room.maxPeers}<span class="who">${who}</span></td>
-      <td>${talking}<span class="who">máx. ${room.maxSpeakers} a la vez</span></td>
+      <td>${talking}<span class="who">máx. ${room.maxSpeakers} a la vez${
+        room.langs?.length ? ` · solo ${room.langs.join('/')}` : ' · idiomas libres'}</span></td>
       <td>${room.minutesUsed} min</td>
       <td>${room.minutesLeft} min</td>
       <td style="text-align:right;white-space:nowrap">
@@ -104,6 +105,7 @@ async function createRoom() {
         minutes: Number(el('minutes').value),
         maxPeers: Number(el('maxPeers').value),
         maxSpeakers: Number(el('maxSpeakers').value),
+        langs: el('langs').value,
       }),
     });
     el('label').value = '';

@@ -75,7 +75,23 @@ function refreshShareLink() {
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
-function renderPeers(peers) {
+function renderPeers(peers, compact) {
+  // En salas grandes el servidor manda solo el recuento y quién habla: mandar
+  // 150 nombres a 150 personas cada vez que entra alguien es tráfico al
+  // cuadrado, y esa lista tampoco le sirve a nadie.
+  if (compact) {
+    const talking = compact.speaking || [];
+    el.peers.innerHTML =
+      `<span class="peer">${compact.count} personas en la sala</span>` +
+      talking.map((p) => `<span class="peer talking">🎙️ ${esc(p.name)}</span>`).join('');
+    if (!hasMic && !micPending) {
+      el.micHint.innerHTML = talking.length
+        ? `Hablando ahora: <b>${talking.map((p) => esc(p.name)).join(', ')}</b>.`
+        : 'Estás escuchando. Pulsa <b>Hablar</b> cuando quieras preguntar.';
+    }
+    return;
+  }
+
   if (!peers.length) {
     el.peers.innerHTML = '<span class="hint">Nadie todavía.</span>';
     return;
@@ -208,12 +224,19 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'joined':
       myPeerId = msg.peerId;
+      applyRoomLangs(msg);
       setStatus(`En la sala "${msg.room}" — estás escuchando`, 'live');
       renderPeers(msg.peers);
       break;
 
     case 'peers':
-      renderPeers(msg.peers);
+      renderPeers(msg.peers, msg.count !== undefined ? msg : null);
+      break;
+
+    // El servidor ajustó nuestros idiomas a los permitidos en la sala.
+    case 'langs_set':
+      el.speakLang.value = msg.speakLang;
+      el.listenLang.value = msg.listenLang;
       break;
 
     case 'audio':
@@ -271,6 +294,22 @@ function handleMessage(msg) {
       setStatus(msg.message, 'err');
       break;
   }
+}
+
+// La sala puede venir con los idiomas fijados por quien la creó: se recortan
+// los selectores para que nadie elija uno de más (cada idioma extra es otra
+// sesión de traducción y multiplica el coste del evento).
+function applyRoomLangs(msg) {
+  if (Array.isArray(msg.langs) && msg.langs.length) {
+    const permitidos = LANGUAGES.filter((l) => msg.langs.includes(l.code));
+    for (const [select, valor] of [[el.speakLang, msg.speakLang], [el.listenLang, msg.listenLang]]) {
+      select.innerHTML = permitidos
+        .map((l) => `<option value="${l.code}"${l.code === valor ? ' selected' : ''}>${l.name}</option>`)
+        .join('');
+    }
+  }
+  if (msg.speakLang) el.speakLang.value = msg.speakLang;
+  if (msg.listenLang) el.listenLang.value = msg.listenLang;
 }
 
 // ── Micrófono ─────────────────────────────────────────────────────────────────
