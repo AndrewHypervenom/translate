@@ -88,6 +88,16 @@
       </div>
 
       <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div class="label" style="margin:0">Coste</div>
+          <button class="ghost" id="refreshCosts">Consultar factura</button>
+        </div>
+        <div class="big" id="costToday">—</div>
+        <div class="muted" id="costHint">Pulsa "Consultar factura" para cruzar lo medido con lo que OpenAI cobró de verdad.</div>
+        <div id="costTable" style="margin-top:14px"></div>
+      </div>
+
+      <div class="card">
         <div class="label">Crear una sala</div>
         <div class="row">
           <div class="col">

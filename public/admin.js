@@ -29,6 +29,66 @@ async function api(path, options = {}) {
   return data;
 }
 
+// ── Coste real ────────────────────────────────────────────────────────────────
+// La tabla de precios dice una cosa y la factura otra. Se cruzan los minutos
+// medidos aquí con lo que OpenAI cobró de verdad, y de ahí sale el precio real
+// por minuto — que es el que se usa para estimar lo que llevas gastado hoy,
+// porque la factura va por días y llega con retraso.
+
+const money = (n) => '$' + Number(n).toFixed(2);
+
+async function loadCosts() {
+  el('refreshCosts').textContent = 'Consultando…';
+  let c;
+  try {
+    c = await api('/costs');
+  } catch (e) {
+    show('err', esc(e.message));
+    el('refreshCosts').textContent = 'Consultar factura';
+    return;
+  }
+  el('refreshCosts').textContent = 'Consultar factura';
+
+  el('costToday').textContent = `${money(c.todayEstimate)} hoy · ${c.todayMinutes} min`;
+
+  if (!c.available) {
+    el('costHint').innerHTML = `Estimado con la tabla de precios (${money(c.pricePerMinute)}/min). `
+      + `Para ver lo que <b>realmente</b> te cobran: ${esc(c.reason)}`;
+    el('costTable').innerHTML = '';
+    return;
+  }
+
+  if (c.realPricePerMinute) {
+    const desvio = ((c.realPricePerMinute / c.pricePerMinute - 1) * 100);
+    el('costHint').innerHTML = `Calculado con tu precio <b>real</b>: `
+      + `<b>$${c.realPricePerMinute.toFixed(4)}/min</b>, sacado de ${c.calibratedOn.days} día(s) ya facturados `
+      + `(${c.calibratedOn.minutes} min → ${money(c.calibratedOn.cost)}). `
+      + `La tabla de precios decía $${c.pricePerMinute.toFixed(4)}: `
+      + `<b>${desvio >= 0 ? '+' : ''}${desvio.toFixed(0)}%</b> de diferencia.`;
+  } else {
+    el('costHint').innerHTML = `Estimado con la tabla (${money(c.pricePerMinute)}/min). `
+      + 'En cuanto haya un día completo facturado, aquí saldrá tu precio real.';
+  }
+
+  el('costTable').innerHTML = `
+    <table>
+      <thead><tr><th>Día</th><th>Medido</th><th>Facturado</th><th>Real por minuto</th></tr></thead>
+      <tbody>${c.days.slice().reverse().map((d) => {
+        const tasa = d.real && d.minutes > 0.5 ? '$' + (d.real / d.minutes).toFixed(4) : '—';
+        const lineas = Object.entries(d.lines).map(([k, v]) => `${esc(k)}: ${money(v)}`).join(' · ');
+        return `<tr>
+          <td>${esc(d.day)}</td>
+          <td>${d.minutes} min</td>
+          <td>${d.real === null ? '<span class="who">sin datos aún</span>' : money(d.real)}
+            ${lineas ? `<span class="who">${lineas}</span>` : ''}</td>
+          <td>${tasa}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>
+    <div class="muted" style="margin-top:10px">La factura es de toda tu cuenta de OpenAI. El desglose por línea
+      te deja ver qué parte es de la traducción y qué parte de otras cosas tuyas.</div>`;
+}
+
 // ── Idiomas permitidos ────────────────────────────────────────────────────────
 // Se eligen marcándolos, no escribiéndolos: un dedazo aquí sale caro. Cada
 // idioma extra es otra sesión de traducción por cada persona que hable, así
@@ -214,6 +274,7 @@ async function unlock(candidate) {
   el('panel').style.display = 'block';
   renderLangChips();
   refresh();
+  loadCosts();
   timer = setInterval(refresh, 5000); // el consumo se mueve mientras hablan
   return true;
 }
@@ -222,6 +283,7 @@ el('enter').onclick = () => unlock(el('key').value.trim());
 el('key').onkeydown = (e) => { if (e.key === 'Enter') unlock(el('key').value.trim()); };
 el('create').onclick = createRoom;
 el('refresh').onclick = refresh;
+el('refreshCosts').onclick = loadCosts;
 
 // Si ya entraste en este navegador, no vuelve a pedir la clave.
 const saved = (() => { try { return localStorage.getItem(KEY_STORE); } catch { return null; } })();

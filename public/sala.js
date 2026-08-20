@@ -183,7 +183,7 @@ async function enter() {
 
   // Solo para reproducir. El micrófono se pide al pulsar "Hablar", así los
   // asistentes que únicamente escuchan no ven ni el aviso de permiso.
-  audioCtx = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
+  audioCtx = createAudioContext();
   await audioCtx.resume().catch(() => {});
 
   active = true;
@@ -199,7 +199,19 @@ async function enter() {
 // micrófono mudo.
 function openSocket(roomId, retomarMic = false) {
   ws = new WebSocket(`${WS_URL}?room=${encodeURIComponent(roomId)}`);
+
+  // Si la conexión ni siquiera llega a abrirse, el navegador puede tardar mucho
+  // en avisar (o no avisar). Sin esto la persona se queda mirando "Sin conectar"
+  // sin saber que su red le está bloqueando el WebSocket.
+  const socket = ws;
+  const abreTarde = setTimeout(() => {
+    if (socket.readyState === WebSocket.CONNECTING) {
+      setStatus('No se consigue abrir la conexión. Suele ser una red que bloquea WebSockets: prueba con otra wifi o con los datos del móvil.', 'err');
+    }
+  }, 12000);
+
   ws.onopen = () => {
+    clearTimeout(abreTarde);
     setStatus('Conectando a la sala…', 'wait');
     send({
       type: 'join',
@@ -212,6 +224,7 @@ function openSocket(roomId, retomarMic = false) {
     if (retomarMic) send({ type: 'request_mic' });
   };
   ws.onclose = () => {
+    clearTimeout(abreTarde);
     // Si el servidor nos rechazó (sala inexistente, llena o caducada) ya mandó
     // el motivo antes de cerrar: no lo pisamos con un "conexión perdida".
     if (!active) return;
@@ -363,7 +376,9 @@ async function takeMic() {
   processor.connect(mute);
   mute.connect(audioCtx.destination);
 
-  gate = new VoiceGate({ frameMs: FRAME_MS });
+  // El AudioContext puede no estar a 24 kHz si el equipo no lo admitía, así que
+  // la duración real de cada frame depende de su frecuencia.
+  gate = new VoiceGate({ frameMs: (FRAME_SAMPLES / audioCtx.sampleRate) * 1000 });
   processor.onaudioprocess = onAudioFrame;
 
   send({ type: 'request_mic' });
@@ -426,7 +441,12 @@ function onAudioFrame(e) {
 
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (started) send({ type: 'speech_start' });
-  for (const frame of frames) send({ type: 'audio_chunk', audio: frameToBase64(frame) });
+  // El modelo solo entiende 24 kHz: si el equipo captura a otra frecuencia hay
+  // que convertirlo o se oiría a otra velocidad.
+  const rate = audioCtx.sampleRate;
+  for (const frame of frames) {
+    send({ type: 'audio_chunk', audio: frameToBase64(resampleTo24k(frame, rate)) });
+  }
   if (ended) send({ type: 'speech_end' });
 }
 
@@ -520,7 +540,17 @@ async function init() {
   refreshShareLink();
   loadRoomInfo(code);
 
-  el.toggle.onclick = () => (active ? leave() : enter());
+  // enter() es asíncrono: sin este catch, cualquier fallo dentro (por ejemplo
+  // que el equipo no admita el AudioContext) rechazaba la promesa en silencio y
+  // la persona pulsaba "Entrar" sin que pasara absolutamente nada.
+  el.toggle.onclick = () => {
+    if (active) { leave(); return; }
+    enter().catch((err) => {
+      console.error(err);
+      setStatus('No se pudo entrar: ' + (err?.message || err), 'err');
+      leave({ keepStatus: true });
+    });
+  };
   el.mic.onclick = () => (hasMic || micPending ? releaseMic() : takeMic());
 
   el.copyBtn.onclick = async () => {

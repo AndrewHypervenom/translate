@@ -116,18 +116,39 @@ function audioMsFromBase64(base64) {
   return bytes / 2 / (SAMPLE_RATE / 1000);
 }
 
+// Clave de administración de OpenAI (sk-admin-…), DISTINTA de la normal. Sin
+// ella solo se puede estimar con la tabla de precios; con ella se consulta lo
+// que de verdad te facturaron y se calcula tu precio real por minuto.
+const OPENAI_ADMIN_KEY = process.env.OPENAI_ADMIN_KEY || '';
+// Precio de referencia mientras no haya datos reales: $0.034/min de
+// gpt-realtime-translate + $0.017/min de gpt-realtime-whisper.
+const PRICE_PER_MINUTE = Number(process.env.PRICE_PER_MINUTE || 0.051);
+
 const billing = {
   day: new Date().toISOString().slice(0, 10),
   usedMs: 0,
+  history: {}, // 'YYYY-MM-DD' -> ms medidos, para comparar con la factura real
 
   rollOver() {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== this.day) {
       console.log(`[Gasto] Nuevo día (${today}): contador a cero`);
+      this.history[this.day] = this.usedMs;
+      // Solo interesan los últimos días para calibrar el precio.
+      for (const d of Object.keys(this.history).sort().slice(0, -14)) delete this.history[d];
       this.day = today;
       this.usedMs = 0;
       for (const room of rooms.values()) room.usedMs = 0;
     }
+  },
+
+  // Minutos medidos por día, incluido el de hoy en curso.
+  minutesByDay() {
+    this.rollOver();
+    const out = {};
+    for (const [d, ms] of Object.entries(this.history)) out[d] = ms / 60000;
+    out[this.day] = this.usedMs / 60000;
+    return out;
   },
 
   limitMs() { return DAILY_LIMIT_MINUTES * 60 * 1000; },
@@ -1223,6 +1244,100 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
   res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });
 });
 
+// ── Coste REAL ────────────────────────────────────────────────────────────────
+// La tabla de precios es una cosa y la factura otra. Aquí se pregunta a OpenAI
+// cuánto cobró de verdad cada día y se cruza con los minutos que medimos
+// nosotros: de ahí sale TU precio real por minuto, que es el que sirve para
+// estimar lo que llevas gastado hoy (la factura va por días y llega tarde).
+//
+// Ojo: la factura es de TODA la organización. Si usas OpenAI para otras cosas,
+// se desglosa por línea para poder distinguirlas.
+const COSTS_CACHE_MS = 10 * 60 * 1000;
+let costsCache = { at: 0, data: null };
+
+async function fetchOpenAICosts(dias = 8) {
+  if (costsCache.data && Date.now() - costsCache.at < COSTS_CACHE_MS) return costsCache.data;
+
+  const desde = new Date();
+  desde.setUTCHours(0, 0, 0, 0);
+  desde.setUTCDate(desde.getUTCDate() - (dias - 1));
+
+  // La base es configurable para poder probarlo sin gastar dinero de verdad.
+  const base = process.env.OPENAI_COSTS_BASE || 'https://api.openai.com';
+  const url = `${base}/v1/organization/costs?start_time=${Math.floor(desde.getTime() / 1000)}`
+    + `&bucket_width=1d&limit=${dias}&group_by=line_item`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${OPENAI_ADMIN_KEY}` } });
+  if (!res.ok) throw new Error(`OpenAI respondió ${res.status}: ${(await res.text()).slice(0, 200)}`);
+
+  const json = await res.json();
+  const porDia = {};
+  for (const bucket of json.data || []) {
+    const dia = new Date(bucket.start_time * 1000).toISOString().slice(0, 10);
+    const entrada = porDia[dia] || (porDia[dia] = { total: 0, lineas: {} });
+    for (const r of bucket.results || []) {
+      const valor = Number(r.amount?.value) || 0;
+      entrada.total += valor;
+      const linea = r.line_item || 'otros';
+      entrada.lineas[linea] = (entrada.lineas[linea] || 0) + valor;
+    }
+  }
+  costsCache = { at: Date.now(), data: porDia };
+  return porDia;
+}
+
+app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
+  const medidos = billing.minutesByDay();
+  const hoy = billing.day;
+
+  if (!OPENAI_ADMIN_KEY) {
+    return res.json({
+      available: false,
+      reason: 'Falta OPENAI_ADMIN_KEY (una clave de administración de OpenAI, sk-admin-…, distinta de la normal).',
+      pricePerMinute: PRICE_PER_MINUTE,
+      todayMinutes: +medidos[hoy].toFixed(2),
+      todayEstimate: +(medidos[hoy] * PRICE_PER_MINUTE).toFixed(3),
+    });
+  }
+
+  let reales;
+  try {
+    reales = await fetchOpenAICosts();
+  } catch (err) {
+    return res.json({
+      available: false,
+      reason: `No se pudo consultar la factura: ${err.message}`,
+      pricePerMinute: PRICE_PER_MINUTE,
+      todayMinutes: +medidos[hoy].toFixed(2),
+      todayEstimate: +(medidos[hoy] * PRICE_PER_MINUTE).toFixed(3),
+    });
+  }
+
+  const dias = [...new Set([...Object.keys(medidos), ...Object.keys(reales)])].sort().slice(-8);
+  const filas = dias.map((day) => ({
+    day,
+    minutes: +(medidos[day] || 0).toFixed(2),
+    real: reales[day] ? +reales[day].total.toFixed(4) : null,
+    lines: reales[day]?.lineas || {},
+  }));
+
+  // El precio real se saca de los días ya CERRADOS con consumo: el de hoy aún
+  // no está facturado del todo y falsearía la media.
+  const calibra = filas.filter((f) => f.day !== hoy && f.real > 0 && f.minutes > 0.5);
+  const minutosCal = calibra.reduce((n, f) => n + f.minutes, 0);
+  const costeCal = calibra.reduce((n, f) => n + f.real, 0);
+  const precioReal = minutosCal > 0 ? costeCal / minutosCal : null;
+
+  res.json({
+    available: true,
+    days: filas,
+    pricePerMinute: PRICE_PER_MINUTE,
+    realPricePerMinute: precioReal ? +precioReal.toFixed(4) : null,
+    calibratedOn: { days: calibra.length, minutes: +minutosCal.toFixed(1), cost: +costeCal.toFixed(2) },
+    todayMinutes: +medidos[hoy].toFixed(2),
+    todayEstimate: +(medidos[hoy] * (precioReal || PRICE_PER_MINUTE)).toFixed(3),
+  });
+});
+
 app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
   const room = rooms.get(normalizeRoomId(req.params.code));
   if (!room) return res.status(404).json({ error: 'Esa sala no existe.' });
@@ -1247,7 +1362,7 @@ function saveState() {
   saveTimer = setTimeout(() => {
     saveTimer = null;
     const data = {
-      billing: { day: billing.day, usedMs: billing.usedMs },
+      billing: { day: billing.day, usedMs: billing.usedMs, history: billing.history },
       rooms: [...rooms.values()].map((r) => ({
         id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
         maxPeers: r.maxPeers, maxSpeakers: r.maxSpeakers, langs: r.langs, usedMs: r.usedMs,
@@ -1267,8 +1382,14 @@ function loadState() {
     return; // primera vez o fichero ilegible: se empieza limpio
   }
 
+  if (data.billing?.history && typeof data.billing.history === 'object') {
+    billing.history = data.billing.history;
+  }
   if (data.billing?.day === new Date().toISOString().slice(0, 10)) {
     billing.usedMs = Number(data.billing.usedMs) || 0;
+  } else if (data.billing?.day) {
+    // El servidor estuvo parado y cambió el día: ese consumo va al histórico.
+    billing.history[data.billing.day] = Number(data.billing.usedMs) || 0;
   }
 
   let recuperadas = 0;

@@ -27,6 +27,35 @@ function frameToBase64(f32) {
   return bufToBase64(f32ToI16(f32).buffer);
 }
 
+// Muchos equipos (Windows con ciertos drivers, iOS) NO admiten forzar el
+// AudioContext a 24 kHz y lanzan NotSupportedError. Antes eso reventaba la
+// entrada a la sala sin decir nada. Se intenta, y si no se puede se usa la
+// frecuencia del equipo y se remuestrea lo que haga falta.
+function createAudioContext() {
+  try {
+    return new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
+  } catch {
+    return new AudioContext();
+  }
+}
+
+// Remuestreo lineal a 24 kHz, que es lo único que entiende el modelo. Para voz
+// es más que suficiente; no merece la pena algo más caro.
+function resampleTo24k(f32, fromRate) {
+  if (fromRate === PCM_SAMPLE_RATE) return f32;
+  const ratio = fromRate / PCM_SAMPLE_RATE;
+  const out = new Float32Array(Math.floor(f32.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    const a = f32[idx];
+    const b = idx + 1 < f32.length ? f32[idx + 1] : a;
+    out[i] = a + (b - a) * frac;
+  }
+  return out;
+}
+
 function rms(f32) {
   let sum = 0;
   for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
