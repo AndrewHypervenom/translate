@@ -16,7 +16,7 @@ const MAX_LINES = 6;
 const el = {};
 for (const id of ['dot', 'statusText', 'statusBar', 'name', 'speakLang', 'listenLang',
   'enterBtn', 'leaveBtn', 'langBtn', 'langCode', 'echoBtn', 'lobby', 'room',
-  'subs', 'mic', 'micLabel', 'meter', 'voiceBtn']) {
+  'subs', 'mic', 'micLabel', 'meter']) {
   el[id] = document.getElementById(id);
 }
 
@@ -32,17 +32,13 @@ let hasMic = false;
 let micPending = false;
 let myPeerId = null;
 let rejected = false;
-let useOpus = false;
 let antiEcho = false;
 
-// Voz rápida = leer el texto traducido con el sintetizador del navegador, que
-// es instantáneo. Voz natural = la que genera el modelo, que conserva el tono
-// pero llega con retraso. Por defecto la rápida: en una reunión importa más
-// entenderse a tiempo que el timbre de la voz.
-let vozRapida = true;
+// La traducción se OYE leyendo el texto con el sintetizador del navegador. Es
+// instantáneo: no viaja por la red ni se comprime. La voz que genera el modelo
+// se descartó porque llegaba con segundos de retraso y rellena de silencio.
 let lector = null;
 
-const players = new Map();
 const partials = new Map();
 let lines = [];
 
@@ -96,53 +92,6 @@ function renderPeople(count, speaking) {
   setStatus(gente + quien, 'live');
 }
 
-// ── Reproducción ──────────────────────────────────────────────────────────────
-
-function playerFor(peerId, codec) {
-  if (!audioCtx) return null;
-  const key = `${peerId}:${codec}`;
-  let player = players.get(key);
-  if (!player) {
-    player = codec === 'opus'
-      ? new OpusPlayer(audioCtx, { onFailure: fallBackToPcm, onBlocked: audioBloqueado, onUnblocked: audioDesbloqueado })
-      : new PCMPlayer(audioCtx, { onBlocked: audioBloqueado, onUnblocked: audioDesbloqueado });
-    players.set(key, player);
-  }
-  return player;
-}
-
-// El navegador puede tener el audio bloqueado (pestaña en segundo plano,
-// móvil bloqueado, política de reproducción automática). Sin avisar, la
-// persona se queda mirando los subtítulos sin oír nada y sin saber por qué.
-let avisoBloqueo = null;
-
-function audioBloqueado() {
-  if (avisoBloqueo) return;
-  avisoBloqueo = true;
-  setStatus(t('audio.blocked'), 'err');
-  audioCtx?.resume?.().catch(() => {});
-}
-
-function audioDesbloqueado() {
-  if (!avisoBloqueo) return;
-  avisoBloqueo = null;
-  setStatus('', '');
-}
-
-function fallBackToPcm() {
-  if (!useOpus) return;
-  useOpus = false;
-  for (const [key, player] of players) {
-    if (key.endsWith(':opus')) { player.close?.(); players.delete(key); }
-  }
-  send({ type: 'set_codec', codec: 'pcm' });
-}
-
-function remoteAudioPending() {
-  for (const player of players.values()) if (player.pendingMs() > 60) return true;
-  return false;
-}
-
 // ── Entrar ────────────────────────────────────────────────────────────────────
 
 async function enter() {
@@ -158,8 +107,6 @@ async function enter() {
   el.room.style.display = 'flex';
   el.leaveBtn.hidden = false;
   el.echoBtn.hidden = false;
-  el.voiceBtn.hidden = false;
-  renderVoiceBtn();
   renderSubs();
   renderMic();
   openSocket(roomCode);
@@ -186,8 +133,6 @@ function openSocket(code, retomarMic = false) {
       name: el.name.value.trim() || t('room.you'),
       speakLang: el.speakLang.value,
       listenLang: el.listenLang.value,
-      codecs: vozRapida ? [] : (useOpus ? ['opus'] : []),
-      wantsAudio: !vozRapida,
     });
     if (retomarMic) send({ type: 'request_mic' });
   };
@@ -238,22 +183,14 @@ function handleMessage(msg) {
         msg.speaking ?? msg.peers?.filter((p) => p.hasMic));
       break;
 
-    case 'audio':
-      if (vozRapida) break; // se está leyendo el texto; el audio del modelo sobra
-      playerFor(msg.from, msg.codec === 'opus' ? 'opus' : 'pcm')?.feed(msg.chunk);
-      break;
-
     case 'partial':
       partials.set(msg.from, { name: msg.name, text: msg.text });
-      if (vozRapida) lector?.parcial(msg.from, msg.text);
+      lector?.parcial(msg.from, msg.text);
       renderSubs();
       break;
 
     case 'final':
-      if (vozRapida) lector?.final(msg.from, msg.text);
-      // Fin de frase: se vacía el descompresor para que la voz suene YA y no
-      // se quede dentro esperando a la frase siguiente.
-      else playerFor(msg.from, 'opus')?.flush?.();
+      lector?.final(msg.from, msg.text);
       partials.delete(msg.from);
       lines.push({ name: msg.name, text: msg.text });
       if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
@@ -306,12 +243,6 @@ function applyRoomLangs(msg) {
 }
 
 // ── Micrófono ─────────────────────────────────────────────────────────────────
-
-function renderVoiceBtn() {
-  el.voiceBtn.textContent = vozRapida ? '⚡ ' + t('voice.fast') : '🎙️ ' + t('voice.natural');
-  el.voiceBtn.classList.toggle('on', vozRapida);
-  el.voiceBtn.title = t('voice.help');
-}
 
 function renderMic() {
   el.mic.disabled = micPending;
@@ -389,13 +320,6 @@ function onAudioFrame(e) {
   const f32 = e.inputBuffer.getChannelData(0);
   if (!hasMic) return;
 
-  // Con altavoces el micrófono recaptura la traducción y se realimenta: no se
-  // ABRE mientras suena otra voz. Si ya estabas hablando, sigues.
-  if (antiEcho && remoteAudioPending() && !gate.open) {
-    el.meter.style.width = '0';
-    return;
-  }
-
   const { frames, level, started, ended } = gate.push(f32);
   el.meter.style.width = Math.min(100, level * 400) + '%';
   watchMicHealth(level, frames.length > 0);
@@ -418,8 +342,6 @@ function leave({ keepStatus = false } = {}) {
   stopCapture();
   lector?.callar();
   lector = null;
-  for (const player of players.values()) player.close?.();
-  players.clear();
   audioCtx?.close().catch(() => {});
   audioCtx = null;
   myPeerId = null;
@@ -447,7 +369,6 @@ function savePrefs() {
       speakLang: el.speakLang.value,
       listenLang: el.listenLang.value,
       antiEcho,
-      vozRapida,
     }));
   } catch { /* incógnito */ }
 }
@@ -494,7 +415,6 @@ function cycleUiLang() {
 async function init() {
   setUiLang(detectUiLang());
   el.langCode.textContent = uiLang.toUpperCase();
-  useOpus = await opusSupported();
 
   const prefs = loadPrefs();
   const porDefecto = UI_LANGS.includes(uiLang) ? uiLang : 'es';
@@ -502,8 +422,6 @@ async function init() {
   fillLangSelect(el.listenLang, prefs.listenLang || porDefecto);
   el.name.value = prefs.name || '';
   antiEcho = prefs.antiEcho ?? false;
-  vozRapida = prefs.vozRapida ?? true;
-  if (!vozDisponible()) vozRapida = false; // navegador sin lector de voz
   el.echoBtn.classList.toggle('on', antiEcho);
   el.echoBtn.textContent = antiEcho ? '🔈' : '🎧';
   setStatus('', '');
@@ -524,15 +442,6 @@ async function init() {
   el.leaveBtn.onclick = () => leave();
   el.mic.onclick = () => (hasMic || micPending ? releaseMic() : takeMic());
   el.langBtn.onclick = cycleUiLang;
-  el.voiceBtn.onclick = () => {
-    vozRapida = !vozRapida;
-    lector?.callar();
-    // Si se lee el texto aquí, que el servidor no gaste ancho de banda
-    // mandando una voz que nadie va a reproducir.
-    send({ type: 'set_codec', codec: vozRapida ? 'none' : (useOpus ? 'opus' : 'pcm') });
-    renderVoiceBtn();
-    savePrefs();
-  };
   el.echoBtn.onclick = () => {
     antiEcho = !antiEcho;
     el.echoBtn.classList.toggle('on', antiEcho);

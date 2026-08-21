@@ -14,13 +14,19 @@ function vozDisponible() {
 }
 
 // Corta el texto en trozos que ya se pueden leer sin esperar al final de la
-// frase: en cuanto hay una coma, un punto o suficientes palabras sueltas.
-// Así se empieza a oír mientras la persona sigue hablando.
-const CORTE = /[.,;:!?…]+\s|[.,;:!?…]+$/;
-const PALABRAS_MINIMAS = 7;
+// frase, para empezar a oír mientras la persona sigue hablando.
+//
+// Cada trozo es una lectura independiente y el sintetizador mete una pausa
+// entre lecturas: cuantos más trozos, más entrecortado suena. Por eso se corta
+// LO MENOS posible — solo en final de frase, o en una coma si el trozo ya se
+// ha hecho largo — en vez de en cada coma.
+const FIN_DE_FRASE = /[.!?…]+(\s|$)/;
+const PAUSA_MENOR = /[,;:]+(\s|$)/;
+const PALABRAS_PARA_CORTAR = 14;  // sin puntuación, se corta al llegar aquí
+const PALABRAS_PARA_COMA = 9;     // por debajo de esto, una coma no justifica cortar
 
 class LectorDeVoz {
-  constructor({ lang = 'es', rate = 1.05 } = {}) {
+  constructor({ lang = 'es', rate = 1.12 } = {}) {
     this.lang = lang;
     this.rate = rate;
     this.dicho = new Map();   // quién -> cuánto texto suyo se ha leído ya
@@ -35,24 +41,37 @@ class LectorDeVoz {
     const nuevo = texto.slice(yaDicho);
     if (!nuevo) return;
 
-    // ¿Hay un corte natural en lo nuevo? Se lee hasta ahí.
-    const corte = nuevo.search(CORTE);
-    if (corte >= 0) {
-      const m = nuevo.slice(corte).match(CORTE);
-      const hasta = corte + (m ? m[0].length : 1);
-      this.decir(nuevo.slice(0, hasta));
-      this.dicho.set(from, yaDicho + hasta);
-      return;
+    const palabras = nuevo.trim() ? nuevo.trim().split(/\s+/).length : 0;
+
+    // Final de frase: siempre se lee, ahí la pausa es natural.
+    const hasta = this.buscarCorte(nuevo, FIN_DE_FRASE);
+    if (hasta > 0) return this.soltar(from, yaDicho, nuevo, hasta);
+
+    // Coma o punto y coma, pero solo si el trozo ya es lo bastante largo como
+    // para que cortarlo no suene entrecortado.
+    if (palabras >= PALABRAS_PARA_COMA) {
+      const coma = this.buscarCorte(nuevo, PAUSA_MENOR);
+      if (coma > 0) return this.soltar(from, yaDicho, nuevo, coma);
     }
-    // Sin corte, pero ya son bastantes palabras: se lee igual para no esperar.
-    const palabras = nuevo.trim().split(/\s+/);
-    if (palabras.length >= PALABRAS_MINIMAS) {
-      const hasta = nuevo.lastIndexOf(' ');
-      if (hasta > 0) {
-        this.decir(nuevo.slice(0, hasta));
-        this.dicho.set(from, yaDicho + hasta);
-      }
+
+    // Sin puntuación a la vista y ya es largo: se corta en un espacio para no
+    // hacer esperar a quien escucha.
+    if (palabras >= PALABRAS_PARA_CORTAR) {
+      const espacio = nuevo.lastIndexOf(' ');
+      if (espacio > 0) this.soltar(from, yaDicho, nuevo, espacio);
     }
+  }
+
+  buscarCorte(texto, patron) {
+    const pos = texto.search(patron);
+    if (pos < 0) return -1;
+    const m = texto.slice(pos).match(patron);
+    return pos + (m ? m[0].length : 1);
+  }
+
+  soltar(from, yaDicho, nuevo, hasta) {
+    this.decir(nuevo.slice(0, hasta));
+    this.dicho.set(from, yaDicho + hasta);
   }
 
   // Frase cerrada: se lee lo que quede sin leer y se olvida a esa persona.

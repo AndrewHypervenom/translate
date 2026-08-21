@@ -5,7 +5,6 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
-const OpusScript = require('opusscript');
 
 if (!process.env.OPENAI_API_KEY) {
   console.error('ERROR: OPENAI_API_KEY no está configurada. Agrega tu clave al archivo .env');
@@ -660,58 +659,6 @@ wss.on('connection', (clientWs) => {
 
 const MAX_TARGET_LANGS_PER_SPEAKER = 6; // tope de coste por hablante
 
-// ── Compresión del audio que sale hacia los oyentes ───────────────────────────
-// El PCM en crudo son 512 kbps por oyente (384 de audio + un tercio por el
-// base64). Con 50 personas escuchando eso son ~25 Mbps sostenidos, que ninguna
-// instancia pequeña aguanta. En Opus a 32 kbps la voz queda intacta —medido:
-// el 100 % de las palabras se transcriben igual— y baja a ~43 kbps con base64,
-// unas 12 veces menos. Se comprime UNA vez por idioma y se reparte a todos.
-//
-// No todos los navegadores traen WebCodecs (AudioDecoder), así que cada cliente
-// dice al entrar si sabe descomprimir; a los que no, se les sigue mandando PCM.
-const OPUS_BITRATE = Number(process.env.OPUS_BITRATE || 32000);
-const OPUS_FRAME_SAMPLES = 480; // 20 ms a 24 kHz: tamaño de trama válido en Opus
-const OPUS_FRAME_BYTES = OPUS_FRAME_SAMPLES * 2;
-
-class OpusStream {
-  constructor() {
-    this.encoder = new OpusScript(SAMPLE_RATE, 1, OpusScript.Application.AUDIO);
-    this.encoder.setBitrate(OPUS_BITRATE);
-    this.pending = Buffer.alloc(0); // PCM que no llena una trama entera todavía
-  }
-
-  // Recibe PCM16 en base64 y devuelve las tramas Opus completas que salgan.
-  push(base64Pcm) {
-    const pcm = Buffer.from(base64Pcm, 'base64');
-    this.pending = this.pending.length ? Buffer.concat([this.pending, pcm]) : pcm;
-
-    const packets = [];
-    let offset = 0;
-    while (this.pending.length - offset >= OPUS_FRAME_BYTES) {
-      const frame = this.pending.subarray(offset, offset + OPUS_FRAME_BYTES);
-      packets.push(this.encoder.encode(frame, OPUS_FRAME_SAMPLES).toString('base64'));
-      offset += OPUS_FRAME_BYTES;
-    }
-    this.pending = offset ? this.pending.subarray(offset) : this.pending;
-    return packets;
-  }
-
-  // Al cerrar la frase quedan unas pocas muestras sueltas: se completan con
-  // silencio para que no se pierda la última sílaba.
-  flush() {
-    if (!this.pending.length) return [];
-    const frame = Buffer.alloc(OPUS_FRAME_BYTES);
-    this.pending.copy(frame);
-    this.pending = Buffer.alloc(0);
-    return [this.encoder.encode(frame, OPUS_FRAME_SAMPLES).toString('base64')];
-  }
-
-  close() {
-    this.pending = Buffer.alloc(0);
-    try { this.encoder.delete(); } catch { /* ya liberado */ }
-  }
-}
-
 const rooms = new Map();
 
 // Códigos cortos, legibles por teléfono y no adivinables. Sin vocales, para que
@@ -818,14 +765,6 @@ class Room {
     }
   }
 
-  listenersOf(lang, speaker) {
-    const list = [];
-    for (const peer of this.peers.values()) {
-      if (peer !== speaker && peer.listenLang === lang) list.push(peer);
-    }
-    return list;
-  }
-
   broadcast(data) {
     const payload = JSON.stringify(data);
     for (const peer of this.peers.values()) peer.sendRaw(payload);
@@ -878,59 +817,6 @@ class RoomPeer {
     // de al lado: caos para quien escucha y la factura multiplicada por 50.
     this.hasMic = false;
     this.micAudioAt = 0;
-    this.wantsOpus = false;             // lo dice el cliente al entrar
-    // Quien lee la traducción con la voz del navegador no necesita que le
-    // mandemos audio: es ancho de banda tirado.
-    this.wantsAudio = true;
-    this.audioDropped = 0;              // trozos tirados por conexión lenta
-    this.opusStreams = new Map();       // targetLang -> OpusStream
-  }
-
-  // Reparte un trozo de audio traducido: comprimido a quien sepa, PCM al resto.
-  // La compresión se hace UNA vez por idioma, no una por oyente.
-  sendAudioToListeners(lang, base64Pcm) {
-    const listeners = this.room.listenersOf(lang, this).filter((p) => p.wantsAudio);
-    if (!listeners.length) return;
-
-    const conOpus = listeners.filter((p) => p.wantsOpus);
-    const sinOpus = listeners.filter((p) => !p.wantsOpus);
-
-    if (sinOpus.length) {
-      const payload = JSON.stringify({ type: 'audio', codec: 'pcm', chunk: base64Pcm, from: this.id });
-      for (const peer of sinOpus) peer.sendAudioRaw(payload);
-    }
-
-    if (conOpus.length) {
-      for (const packet of this.opusStreamFor(lang).push(base64Pcm)) {
-        const payload = JSON.stringify({ type: 'audio', codec: 'opus', chunk: packet, from: this.id });
-        for (const peer of conOpus) peer.sendAudioRaw(payload);
-      }
-    }
-  }
-
-  opusStreamFor(lang) {
-    let stream = this.opusStreams.get(lang);
-    if (!stream) {
-      stream = new OpusStream();
-      this.opusStreams.set(lang, stream);
-    }
-    return stream;
-  }
-
-  // Cierra la trama a medias que quede al terminar la frase.
-  flushOpus(lang) {
-    const stream = this.opusStreams.get(lang);
-    if (!stream) return;
-    const conOpus = this.room.listenersOf(lang, this).filter((p) => p.wantsOpus);
-    for (const packet of stream.flush()) {
-      const payload = JSON.stringify({ type: 'audio', codec: 'opus', chunk: packet, from: this.id });
-      for (const peer of conOpus) peer.sendAudioRaw(payload);
-    }
-  }
-
-  closeOpus() {
-    for (const stream of this.opusStreams.values()) stream.close();
-    this.opusStreams.clear();
   }
 
   send(data) {
@@ -939,30 +825,6 @@ class RoomPeer {
 
   sendRaw(payload) {
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(payload);
-  }
-
-  // El audio es perecedero: si a alguien se le atasca la conexión, seguir
-  // metiéndole trozos en la cola solo consigue que dentro de un minuto lo oiga
-  // TODO de golpe y atropellado. Mejor tirar lo que ya no le va a llegar a
-  // tiempo y que siga oyendo el presente.
-  //
-  // Los mensajes de control (subtítulos, avisos, lista de gente) NO pasan por
-  // aquí: son pequeños y tienen que llegar siempre. Por eso el texto se veía
-  // bien mientras la voz se acumulaba.
-  sendAudioRaw(payload) {
-    if (this.ws.readyState !== WebSocket.OPEN) return;
-    if (this.ws.bufferedAmount > this.audioBufferLimit()) {
-      this.audioDropped++;
-      return;
-    }
-    this.ws.send(payload);
-  }
-
-  // Cuántos bytes de audio pendientes se toleran antes de empezar a tirar.
-  // Comprimido son ~5 KB/s y sin comprimir ~64 KB/s, así que el límite en
-  // bytes tiene que depender del códec para que en ambos casos sean ~2 s.
-  audioBufferLimit() {
-    return this.wantsOpus ? 12 * 1024 : 128 * 1024;
   }
 
   // El primer traductor es el que devuelve al hablante su propia transcripción
@@ -984,11 +846,9 @@ class RoomPeer {
         code: 'budget_exhausted',
         message: 'Se alcanzó el límite de uso de hoy. La traducción se ha detenido.',
       }),
-      onAudioDelta: (chunk) => this.sendAudioToListeners(lang, chunk),
       onOutputDelta: (_delta, _itemId, full) =>
         this.room.sendToListeners(lang, this, { type: 'partial', text: full, from: this.id, name: this.name }),
       onPhraseEnd: ({ original, translation }) => {
-        this.flushOpus(lang); // no dejar la última trama a medias
         if (translation) {
           this.room.sendToListeners(lang, this, { type: 'final', text: translation, from: this.id, name: this.name });
         }
@@ -1012,9 +872,6 @@ class RoomPeer {
       if (!targets.has(lang)) {
         translator.dispose();
         this.translators.delete(lang);
-        // Ese idioma ya no tiene oyentes: liberar también su codificador.
-        this.opusStreams.get(lang)?.close();
-        this.opusStreams.delete(lang);
       }
     }
     for (const lang of targets) this.ensureTranslator(lang);
@@ -1027,7 +884,6 @@ class RoomPeer {
   dispose() {
     for (const translator of this.translators.values()) translator.dispose();
     this.translators.clear();
-    this.closeOpus(); // libera la memoria del codificador
   }
 }
 
@@ -1083,8 +939,6 @@ roomWss.on('connection', (ws, req) => {
       listenLang: room.clampLang(msg.listenLang || 'es'),
     });
     // El cliente dice qué sabe descomprimir. Sin WebCodecs se le manda PCM.
-    peer.wantsOpus = Array.isArray(msg.codecs) && msg.codecs.includes('opus');
-    peer.wantsAudio = msg.wantsAudio !== false;
     room.peers.set(peer.id, peer);
     console.log(`[${roomId}] + ${peer.name} (habla ${peer.speakLang}, escucha ${peer.listenLang}) — ${room.peers.size} en sala`);
 
@@ -1149,14 +1003,6 @@ roomWss.on('connection', (ws, req) => {
 
       case 'release_mic':
         releaseMic(peer);
-        break;
-
-      // Red de seguridad: si al cliente le falla el descompresor en marcha,
-      // pide volver a PCM en vez de quedarse sin oír nada.
-      case 'set_codec':
-        peer.wantsAudio = msg.codec !== 'none';
-        peer.wantsOpus = msg.codec === 'opus';
-        console.log(`[${peer.room.id}] ${peer.name} → audio en ${peer.wantsOpus ? 'opus' : 'pcm'}`);
         break;
 
       case 'speech_start':
