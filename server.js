@@ -108,6 +108,8 @@ const ROOM_DEFAULT_MAX_SPEAKERS = Number(process.env.ROOM_MAX_SPEAKERS || 2);
 const ROOM_PEERS_HARD_CAP = Number(process.env.ROOM_PEERS_HARD_CAP || 60);
 // Por encima de esto se deja de mandar la lista completa de participantes.
 const ROSTER_FULL_LIMIT = Number(process.env.ROSTER_FULL_LIMIT || 25);
+// Con cuánta antelación se avisa de que la sala va a cerrar.
+const CLOSING_WARNING_MS = Number(process.env.CLOSING_WARNING_MS || 5 * 60 * 1000);
 const MAX_OPEN_ROOMS = Number(process.env.MAX_OPEN_ROOMS || 20);
 
 // Cuántos ms de audio representa un trozo en base64 de PCM16 mono a 24 kHz.
@@ -148,7 +150,7 @@ const billing = {
 // SESIÓN DE TRADUCCIÓN
 // ════════════════════════════════════════════════════════════════════════════
 
-const SESSION_MAX_MS = 8 * 60 * 1000; // vida máxima antes de reciclar por contexto
+const SESSION_MAX_MS = Number(process.env.SESSION_MAX_MS || 8 * 60 * 1000); // vida máxima antes de reciclar
 // Sin audio se duerme la sesión. Generoso a propósito: sólo se paga por audio
 // procesado, así que una sesión abierta y callada no cuesta nada, mientras que
 // despertarla en mitad de una conversación mete 1-2 s de espera al hablar.
@@ -730,6 +732,7 @@ class Room {
     this.maxPeers = maxPeers;
     this.maxSpeakers = maxSpeakers;
     this.usedMs = 0;
+    this.avisadoDeCierre = false; // para no repetir el aviso de cierre
   }
 
   speakers() {
@@ -1272,6 +1275,24 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
   res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });
 });
 
+// Alargar una sala en marcha. Sin esto, si el evento se alarga la sala caduca
+// y echa a todo el mundo a mitad, obligando a crear otra y repartir enlace nuevo.
+app.post('/admin/api/rooms/:code/extend', requireAdmin, (req, res) => {
+  const room = rooms.get(normalizeRoomId(req.params.code));
+  if (!room) return res.status(404).json({ error: 'Esa sala no existe.' });
+  const minutos = Math.min(480, Math.max(5, Number(req.body?.minutes) || 30));
+  room.expiresAt += minutos * 60 * 1000;
+  room.avisadoDeCierre = false; // que vuelva a avisar cuando toque
+  room.broadcast({
+    type: 'notice',
+    code: 'extended',
+    message: `La sala se amplió ${minutos} minutos.`,
+  });
+  saveState();
+  console.log(`[admin] Sala "${room.id}" ampliada ${minutos} min`);
+  res.json(room.summary());
+});
+
 app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
   const room = rooms.get(normalizeRoomId(req.params.code));
   if (!room) return res.status(404).json({ error: 'Esa sala no existe.' });
@@ -1363,8 +1384,19 @@ function sweepRooms() {
   const now = Date.now();
   for (const room of [...rooms.values()]) {
     if (room.expired) {
-      room.close('La sala ha caducado.');
+      room.close('La sala ha terminado.');
       continue;
+    }
+    // Aviso antes de cerrar: que nadie se quede cortado de golpe, y que quien
+    // organiza tenga tiempo de ampliarla desde el panel.
+    const quedan = room.expiresAt - now;
+    if (!room.avisadoDeCierre && quedan < CLOSING_WARNING_MS && room.peers.size > 0) {
+      room.avisadoDeCierre = true;
+      room.broadcast({
+        type: 'notice',
+        code: 'closing_soon',
+        message: `La sala termina en ${Math.max(1, Math.round(quedan / 60000))} minutos.`,
+      });
     }
     for (const peer of room.speakers()) {
       if (now - peer.micAudioAt > MIC_IDLE_MS) {
@@ -1373,7 +1405,7 @@ function sweepRooms() {
     }
   }
 }
-setInterval(sweepRooms, 30000);
+setInterval(sweepRooms, Number(process.env.SWEEP_MS || 30000));
 
 app.get('/health', (_req, res) => {
   res.json({

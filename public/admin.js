@@ -115,6 +115,7 @@ function renderRooms(list) {
   for (const room of list) {
     el(`copy-${room.code}`).onclick = () => copyLink(room.code);
     el(`close-${room.code}`).onclick = () => closeRoom(room.code);
+    el(`more-${room.code}`).onclick = () => extendRoom(room.code);
   }
 }
 
@@ -137,6 +138,7 @@ function roomRow(room) {
       <td>${room.minutesLeft} min</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="ghost" id="copy-${esc(room.code)}">Copiar enlace</button>
+        <button class="ghost" id="more-${esc(room.code)}">+30 min</button>
         <button class="danger" id="close-${esc(room.code)}">Cerrar</button>
       </td>
     </tr>`;
@@ -186,6 +188,16 @@ async function copyLink(code) {
     btn.textContent = '¡Copiado!';
     setTimeout(() => { btn.textContent = 'Copiar enlace'; }, 1800);
   }
+}
+
+// Alargar la sala en marcha: si el evento se estira, evita que caduque y eche
+// a todo el mundo, obligando a crear otra y repartir un enlace nuevo.
+async function extendRoom(code) {
+  try {
+    await api(`/rooms/${code}/extend`, { method: 'POST', body: JSON.stringify({ minutes: 30 }) });
+    show('ok', 'Sala ampliada 30 minutos.');
+    refresh();
+  } catch (e) { show('err', esc(e.message)); }
 }
 
 async function closeRoom(code) {
