@@ -22,15 +22,15 @@ function vozDisponible() {
 // ha hecho largo — en vez de en cada coma.
 const FIN_DE_FRASE = /[.!?…]+(\s|$)/;
 const PAUSA_MENOR = /[,;:]+(\s|$)/;
-const PALABRAS_PARA_CORTAR = 14;  // sin puntuación, se corta al llegar aquí
-const PALABRAS_PARA_COMA = 14;    // por debajo de esto, una coma no justifica cortar
+const PALABRAS_PARA_CORTAR = 10;  // sin puntuación, se corta al llegar aquí
+const PALABRAS_PARA_COMA = 10;    // por debajo de esto, una coma no justifica cortar
 // El ARRANQUE va aparte: en cuanto hay unas pocas palabras se empieza a leer,
 // para que la voz salga a la vez que el texto. Los umbrales altos de arriba se
 // aplican al resto de la frase, que es donde importa que suene fluido.
-const PALABRAS_PARA_EMPEZAR = 3;
+const PALABRAS_PARA_EMPEZAR = 2;
 
 class LectorDeVoz {
-  constructor({ lang = 'es', rate = 1.32 } = {}) {
+  constructor({ lang = 'es', rate = 1.25 } = {}) {
     this.lang = lang;
     this.rate = rate;
     this.dicho = new Map();   // quién -> cuánto texto suyo se ha leído ya
