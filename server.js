@@ -131,6 +131,7 @@ const billing = {
   // Marcador de "empieza a contar desde aquí". La factura de OpenAI no se
   // puede borrar —ese dinero se gastó—, pero sí se puede descontar lo anterior
   // para que el panel refleje solo el uso a partir de cierto momento.
+  roomLog: [],        // salas ya terminadas, para saber qué costó cada prueba
   since: null,        // días anteriores no se muestran
   sinceAmount: 0,     // ya facturado el día del corte, se resta
   sinceDay: null,
@@ -189,6 +190,14 @@ const SLOW_RECONNECT_MS = 15000;    // luego se sigue intentando, sin rendirse n
 const SAMPLE_RATE = 24000;      // PCM16 mono, el formato que espera el modelo
 const SILENCE_TAIL_MS = 2500;
 const SILENCE_CHUNK_MS = 100;
+// Cuántas veces más rápido que el tiempo real se manda esa cola. Es puro
+// recorte de latencia al final de cada frase: medido, pasar de 1x a 4x bajó la
+// espera tras callarse de 2,7 s a 1,0 s.
+//
+// NO SUBIR MÁS. A 10x el silencio le llega tan rápido al modelo que cierra la
+// frase antes de terminar de traducirla y se come las últimas palabras
+// ("…os objetivos do próximo" en vez de "…do próximo ano").
+const TAIL_SPEEDUP = Number(process.env.TAIL_SPEEDUP || 4);
 const SILENCE_CHUNK = Buffer.alloc((SAMPLE_RATE / 1000) * SILENCE_CHUNK_MS * 2).toString('base64');
 
 // Esta API no emite `output_transcript.done`: la frase se cierra cuando dejan
@@ -477,8 +486,13 @@ class TranslatorSession {
     this.tailSent = 0;
   }
 
-  // Fin de turno: se gotea silencio en tiempo real (no de golpe) para que la
+  // Fin de turno: se gotea silencio en vez de soltarlo de golpe, para que la
   // línea temporal del modelo siga cuadrando si la persona vuelve a hablar.
+  //
+  // Pero se gotea MÁS RÁPIDO que el tiempo real: el modelo cierra la frase
+  // cuando "oye" silencio, así que cada milisegundo que tarde en llegarle es un
+  // milisegundo que el oyente espera a la última parte de la frase. Como la
+  // cola se cancela en cuanto se vuelve a hablar, adelantarla no descuadra nada.
   endTurn() {
     if (this.disposed || this.tailTimer || !this.ws) return;
     this.tailSent = 0;
@@ -487,7 +501,7 @@ class TranslatorSession {
       if (this.disposed || this.tailSent >= SILENCE_TAIL_MS) return;
       this.pushAudio(SILENCE_CHUNK);
       this.tailSent += SILENCE_CHUNK_MS;
-      this.tailTimer = setTimeout(step, SILENCE_CHUNK_MS);
+      this.tailTimer = setTimeout(step, SILENCE_CHUNK_MS / TAIL_SPEEDUP);
     };
     step();
   }
@@ -741,6 +755,8 @@ class Room {
     this.maxPeers = maxPeers;
     this.maxSpeakers = maxSpeakers;
     this.usedMs = 0;
+    this.peakPeers = 0;   // máximo de gente a la vez
+    this.everJoined = 0;  // cuántas personas pasaron en total
   }
 
   speakers() {
@@ -757,6 +773,14 @@ class Room {
       peer.ws.close();
     }
     this.peers.clear();
+    // Ficha de la sala para el historial de costes: sin esto, al cerrarse se
+    // perdía lo que había costado cada prueba.
+    billing.roomLog.push({
+      code: this.id, label: this.label, langs: this.langs,
+      openedAt: this.createdAt, closedAt: Date.now(),
+      usedMs: this.usedMs, peakPeers: this.peakPeers, joined: this.everJoined,
+    });
+    if (billing.roomLog.length > 100) billing.roomLog = billing.roomLog.slice(-100);
     rooms.delete(this.id);
     saveState();
     console.log(`[${this.id}] Sala cerrada: ${reason}`);
@@ -773,6 +797,8 @@ class Room {
       langs: this.langs,
       speaking: this.speakers().map((p) => p.name),
       minutesUsed: +(this.usedMs / 60000).toFixed(2),
+      peakPeers: this.peakPeers,
+      joined: this.everJoined,
       minutesLeft: Math.max(0, Math.round((this.expiresAt - Date.now()) / 60000)),
       expired: this.expired,
     };
@@ -1042,6 +1068,8 @@ roomWss.on('connection', (ws, req) => {
     // El cliente dice qué sabe descomprimir. Sin WebCodecs se le manda PCM.
     peer.wantsOpus = Array.isArray(msg.codecs) && msg.codecs.includes('opus');
     room.peers.set(peer.id, peer);
+    room.everJoined++;
+    room.peakPeers = Math.max(room.peakPeers, room.peers.size);
     console.log(`[${roomId}] + ${peer.name} (habla ${peer.speakLang}, escucha ${peer.listenLang}) — ${room.peers.size} en sala`);
 
     send({
@@ -1294,6 +1322,51 @@ async function fetchOpenAICosts(dias = 8) {
   return porDia;
 }
 
+// Desglose por sala: cuánta gente, cuánto duró y cuánto costó cada prueba.
+// Sin esto solo se veía el total del día y no había forma de saber qué salió
+// caro y qué no.
+function roomBreakdown(precioMinuto) {
+  const fichas = [
+    ...billing.roomLog.map((r) => ({ ...r, open: false })),
+    ...[...rooms.values()].map((r) => ({
+      code: r.id, label: r.label, langs: r.langs,
+      openedAt: r.createdAt, closedAt: null,
+      usedMs: r.usedMs, peakPeers: r.peakPeers, joined: r.everJoined,
+      open: true,
+    })),
+  ];
+
+  const salas = fichas
+    .filter((r) => !billing.since || new Date(r.openedAt).toISOString().slice(0, 10) >= billing.since)
+    .map((r) => {
+      const minutos = r.usedMs / 60000;
+      return {
+        code: r.code,
+        label: r.label,
+        langs: r.langs,
+        open: r.open,
+        openedAt: r.openedAt,
+        // Duración real de la sala, distinta de los minutos traducidos.
+        durationMin: Math.round(((r.closedAt || Date.now()) - r.openedAt) / 60000),
+        peakPeers: r.peakPeers,
+        joined: r.joined,
+        minutes: +minutos.toFixed(2),
+        cost: +(minutos * precioMinuto).toFixed(3),
+      };
+    })
+    .sort((a, b) => b.openedAt - a.openedAt)
+    .slice(0, 40);
+
+  return {
+    rooms: salas,
+    roomsTotal: {
+      count: salas.length,
+      minutes: +salas.reduce((n, r) => n + r.minutes, 0).toFixed(2),
+      cost: +salas.reduce((n, r) => n + r.cost, 0).toFixed(2),
+    },
+  };
+}
+
 app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
   const medidos = billing.minutesByDay();
   const hoy = billing.day;
@@ -1305,6 +1378,9 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
       pricePerMinute: PRICE_PER_MINUTE,
       todayMinutes: +medidos[hoy].toFixed(2),
       todayEstimate: +(medidos[hoy] * PRICE_PER_MINUTE).toFixed(3),
+      since: billing.since,
+      discounted: +billing.sinceAmount.toFixed(2),
+      ...roomBreakdown(PRICE_PER_MINUTE),
     });
   }
 
@@ -1318,6 +1394,9 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
       pricePerMinute: PRICE_PER_MINUTE,
       todayMinutes: +medidos[hoy].toFixed(2),
       todayEstimate: +(medidos[hoy] * PRICE_PER_MINUTE).toFixed(3),
+      since: billing.since,
+      discounted: +billing.sinceAmount.toFixed(2),
+      ...roomBreakdown(PRICE_PER_MINUTE),
     });
   }
 
@@ -1356,6 +1435,7 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
     todayEstimate: +(medidos[hoy] * (precioReal || PRICE_PER_MINUTE)).toFixed(3),
     since: billing.since,
     discounted: +billing.sinceAmount.toFixed(2),
+    ...roomBreakdown(precioReal || PRICE_PER_MINUTE),
   });
 });
 
@@ -1364,8 +1444,9 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
 // cálculo del precio real por minuto.
 app.post('/admin/api/costs/reset', requireAdmin, async (_req, res) => {
   billing.history = {};
+  billing.roomLog = [];
   billing.usedMs = 0;
-  for (const room of rooms.values()) room.usedMs = 0;
+  for (const room of rooms.values()) { room.usedMs = 0; room.peakPeers = room.peers.size; }
 
   const hoy = new Date().toISOString().slice(0, 10);
   billing.since = hoy;
@@ -1414,6 +1495,7 @@ function stateSnapshot() {
     billing: {
       day: billing.day, usedMs: billing.usedMs, history: billing.history,
       since: billing.since, sinceDay: billing.sinceDay, sinceAmount: billing.sinceAmount,
+      roomLog: billing.roomLog,
     },
     rooms: [...rooms.values()].map((r) => ({
       id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
@@ -1455,6 +1537,7 @@ function loadState() {
   if (data.billing?.history && typeof data.billing.history === 'object') {
     billing.history = data.billing.history;
   }
+  billing.roomLog = Array.isArray(data.billing?.roomLog) ? data.billing.roomLog : [];
   billing.since = data.billing?.since || null;
   billing.sinceDay = data.billing?.sinceDay || null;
   billing.sinceAmount = Number(data.billing?.sinceAmount) || 0;

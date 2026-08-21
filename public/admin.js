@@ -37,6 +37,41 @@ async function api(path, options = {}) {
 
 const money = (n) => '$' + Number(n).toFixed(2);
 
+// Qué costó cada sala. Es lo que permite saber cuánto salió cada prueba, en
+// vez de ver solo un total del día sin poder atribuirlo.
+function renderRoomCosts(c) {
+  if (!c.rooms?.length) return '';
+
+  const cuando = (ms) => new Date(ms).toLocaleString([], {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+
+  return `
+    <div class="label" style="margin:4px 0 10px">Por sala</div>
+    <table>
+      <thead><tr><th>Sala</th><th>Cuándo</th><th>Personas</th><th>Duró</th><th>Traducido</th><th>Coste</th></tr></thead>
+      <tbody>
+        ${c.rooms.map((r) => `
+          <tr>
+            <td class="code">${esc(r.code)}${r.open ? ' ●' : ''}
+              <span class="who">${r.label ? esc(r.label) + ' · ' : ''}${(r.langs || []).join('/') || 'libre'}</span></td>
+            <td>${esc(cuando(r.openedAt))}</td>
+            <td>${r.peakPeers}<span class="who">${r.joined} en total</span></td>
+            <td>${r.durationMin} min</td>
+            <td>${r.minutes} min</td>
+            <td>${money(r.cost)}</td>
+          </tr>`).join('')}
+        <tr>
+          <td colspan="4"><b>Total · ${c.roomsTotal.count} salas</b></td>
+          <td><b>${c.roomsTotal.minutes} min</b></td>
+          <td><b>${money(c.roomsTotal.cost)}</b></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="muted" style="margin:8px 0 22px">● sala todavía abierta. <b>Personas</b> es el máximo a la vez.
+      <b>Duró</b> es el tiempo que estuvo abierta; <b>Traducido</b>, los minutos que de verdad se pagaron.</div>`;
+}
+
 async function loadCosts() {
   el('refreshCosts').textContent = 'Consultando…';
   let c;
@@ -78,12 +113,15 @@ async function loadCosts() {
       + '. Ese gasto anterior sigue en tu cuenta de OpenAI; aquí solo no se muestra.</div>'
     : '';
 
+  const porSala = renderRoomCosts(c);
+
   if (!c.days.length) {
-    el('costTable').innerHTML = '<div class="muted">Todavía no hay consumo registrado.</div>' + corte;
+    el('costTable').innerHTML = porSala
+      + '<div class="muted">Todavía no hay consumo registrado.</div>' + corte;
     return;
   }
 
-  el('costTable').innerHTML = `
+  el('costTable').innerHTML = porSala + `
     <table>
       <thead><tr><th>Día</th><th>Medido</th><th>Facturado</th><th>Real por minuto</th></tr></thead>
       <tbody>${c.days.slice().reverse().map((d) => {
