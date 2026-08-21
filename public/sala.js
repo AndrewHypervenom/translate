@@ -101,6 +101,7 @@ async function enter() {
   audioCtx = createAudioContext();
   await audioCtx.resume().catch(() => {});
   lector = new LectorDeVoz({ lang: el.listenLang.value });
+  lector.calentar(); // deja la voz lista para que la primera frase no tarde
 
   active = true;
   el.lobby.style.display = 'none';

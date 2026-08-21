@@ -27,7 +27,7 @@ const PALABRAS_PARA_COMA = 10;    // por debajo de esto, una coma no justifica c
 // El ARRANQUE va aparte: en cuanto hay unas pocas palabras se empieza a leer,
 // para que la voz salga a la vez que el texto. Los umbrales altos de arriba se
 // aplican al resto de la frase, que es donde importa que suene fluido.
-const PALABRAS_PARA_EMPEZAR = 2;
+const PALABRAS_PARA_EMPEZAR = 1;
 
 class LectorDeVoz {
   constructor({ lang = 'es', rate = 1.25 } = {}) {
@@ -38,6 +38,17 @@ class LectorDeVoz {
   }
 
   setLang(lang) { this.lang = lang; }
+
+  // La primera lectura tarda en arrancar porque el navegador carga la voz justo
+  // entonces, y eso se nota como retraso aunque el texto ya esté. Se le da un
+  // empujón mudo al entrar para que la voz esté lista antes de la primera frase.
+  calentar() {
+    if (!vozDisponible()) return;
+    const u = new SpeechSynthesisUtterance(' ');
+    u.lang = IDIOMA_VOZ[this.lang] || this.lang;
+    u.volume = 0;
+    speechSynthesis.speak(u);
+  }
 
   // Texto parcial: se lee solo lo nuevo que ya forme una unidad con sentido.
   parcial(from, texto) {
@@ -62,7 +73,7 @@ class LectorDeVoz {
     }
 
     // Sin puntuación a la vista: se corta en un espacio para no hacer esperar.
-    if (palabras >= (arrancando ? PALABRAS_PARA_EMPEZAR + 2 : PALABRAS_PARA_CORTAR)) {
+    if (palabras >= (arrancando ? PALABRAS_PARA_EMPEZAR + 1 : PALABRAS_PARA_CORTAR)) {
       const espacio = nuevo.lastIndexOf(' ');
       if (espacio > 0) this.soltar(from, yaDicho, nuevo, espacio);
     }
