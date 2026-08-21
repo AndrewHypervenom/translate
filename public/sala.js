@@ -97,11 +97,29 @@ function playerFor(peerId, codec) {
   let player = players.get(key);
   if (!player) {
     player = codec === 'opus'
-      ? new OpusPlayer(audioCtx, { onFailure: fallBackToPcm })
-      : new PCMPlayer(audioCtx);
+      ? new OpusPlayer(audioCtx, { onFailure: fallBackToPcm, onBlocked: audioBloqueado, onUnblocked: audioDesbloqueado })
+      : new PCMPlayer(audioCtx, { onBlocked: audioBloqueado, onUnblocked: audioDesbloqueado });
     players.set(key, player);
   }
   return player;
+}
+
+// El navegador puede tener el audio bloqueado (pestaña en segundo plano,
+// móvil bloqueado, política de reproducción automática). Sin avisar, la
+// persona se queda mirando los subtítulos sin oír nada y sin saber por qué.
+let avisoBloqueo = null;
+
+function audioBloqueado() {
+  if (avisoBloqueo) return;
+  avisoBloqueo = true;
+  setStatus(t('audio.blocked'), 'err');
+  audioCtx?.resume?.().catch(() => {});
+}
+
+function audioDesbloqueado() {
+  if (!avisoBloqueo) return;
+  avisoBloqueo = null;
+  setStatus('', '');
 }
 
 function fallBackToPcm() {
@@ -492,6 +510,19 @@ async function init() {
       send({ type: 'set_langs', speakLang: el.speakLang.value, listenLang: el.listenLang.value });
     };
   }
+
+  // El navegador solo deja sonar el audio tras un gesto de la persona, y lo
+  // suspende si la pestaña pasa a segundo plano. Cualquier toque o volver a la
+  // pestaña lo reintenta: si no, se queda viendo subtítulos sin oír nada.
+  const reactivarAudio = () => {
+    if (audioCtx && audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+  };
+  for (const evento of ['pointerdown', 'keydown', 'touchstart']) {
+    window.addEventListener(evento, reactivarAudio, { passive: true });
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) reactivarAudio();
+  });
 
   window.addEventListener('beforeunload', () => { if (active) leave(); });
 }

@@ -165,7 +165,15 @@ const SLOW_RECONNECT_MS = 15000;    // luego se sigue intentando, sin rendirse n
 // se queda a medias y la última parte de la frase NUNCA se traduce. Al terminar
 // de hablar le damos una cola de silencio real para que cierre el turno.
 const SAMPLE_RATE = 24000;      // PCM16 mono, el formato que espera el modelo
-const SILENCE_TAIL_MS = 2500;
+// Cola de silencio ADAPTATIVA. Una cantidad fija no vale: una frase corta
+// ("inteligencia emocional") necesita bastante silencio para que el modelo la
+// suelte —medido: con 2,5 s se la guardaba y solo salía cuando volvías a
+// hablar—, mientras que una larga se corta si el silencio le llega demasiado
+// deprisa. Por eso se gotea hasta que el modelo suelte la frase y se calle.
+const SILENCE_TAIL_MIN_MS = Number(process.env.SILENCE_TAIL_MIN_MS || 3000);
+const SILENCE_TAIL_MAX_MS = Number(process.env.SILENCE_TAIL_MAX_MS || 8000);
+// Por debajo de esto se considera frase corta y necesita cola larga.
+const SHORT_TURN_MS = Number(process.env.SHORT_TURN_MS || 5000);
 const SILENCE_CHUNK_MS = 100;
 // Cuántas veces más rápido que el tiempo real se manda esa cola. Es puro
 // recorte de latencia al final de cada frase: medido, pasar de 1x a 4x bajó la
@@ -174,7 +182,7 @@ const SILENCE_CHUNK_MS = 100;
 // NO SUBIR MÁS. A 10x el silencio le llega tan rápido al modelo que cierra la
 // frase antes de terminar de traducirla y se come las últimas palabras
 // ("…os objetivos do próximo" en vez de "…do próximo ano").
-const TAIL_SPEEDUP = Number(process.env.TAIL_SPEEDUP || 4);
+const TAIL_SPEEDUP = Number(process.env.TAIL_SPEEDUP || 8);
 const SILENCE_CHUNK = Buffer.alloc((SAMPLE_RATE / 1000) * SILENCE_CHUNK_MS * 2).toString('base64');
 
 // Esta API no emite `output_transcript.done`: la frase se cierra cuando dejan
@@ -215,6 +223,8 @@ class TranslatorSession {
 
     this.tailTimer = null;
     this.tailSent = 0;
+    this.lastOutputAt = 0;   // cuándo emitió algo el modelo por última vez
+    this.turnAudioMs = 0;    // audio real de este turno, sin contar el silencio
 
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
@@ -331,6 +341,7 @@ class TranslatorSession {
 
       switch (event.type) {
         case 'session.output_audio.delta': {
+          this.lastOutputAt = Date.now();
           const id = this.beginPhrase(true);
           this.armSafetyTimer();
           this.on.onAudioDelta?.(event.delta, id);
@@ -338,6 +349,7 @@ class TranslatorSession {
         }
 
         case 'session.output_transcript.delta': {
+          this.lastOutputAt = Date.now();
           const id = this.beginPhrase(true);
           this.outputBuf += event.delta || '';
           // El texto en streaming también mantiene viva la frase, no solo el audio.
@@ -452,7 +464,9 @@ class TranslatorSession {
 
   appendAudio(base64) {
     if (this.disposed || !base64) return;
+    if (this.tailTimer || this.tailSent) this.turnAudioMs = 0; // turno nuevo
     this.cancelSilenceTail(); // volvió a hablar: la cola ya no toca
+    this.turnAudioMs += audioMsFromBase64(base64);
     // La sesión pudo dormirse por inactividad: despertarla al primer audio.
     if (!this.ws && !this.reconnectTimer) this.connect();
     this.pushAudio(base64);
@@ -473,9 +487,18 @@ class TranslatorSession {
   endTurn() {
     if (this.disposed || this.tailTimer || !this.ws) return;
     this.tailSent = 0;
+
+    // El silencio TAMBIÉN se factura, así que solo se alarga cuando hace falta.
+    // Una frase larga cierra bien con poca cola; una corta ("inteligencia
+    // emocional") necesita mucha más, o el modelo se la guarda hasta que
+    // vuelvas a hablar. Se decide según lo que se acaba de decir: medido, con
+    // cola fija larga pasábamos de 5 s hablados a 17 s facturados.
+    const objetivo = this.turnAudioMs < SHORT_TURN_MS ? SILENCE_TAIL_MAX_MS : SILENCE_TAIL_MIN_MS;
+    this.turnAudioMs = 0;
+
     const step = () => {
       this.tailTimer = null;
-      if (this.disposed || this.tailSent >= SILENCE_TAIL_MS) return;
+      if (this.disposed || this.tailSent >= objetivo) return;
       this.pushAudio(SILENCE_CHUNK);
       this.tailSent += SILENCE_CHUNK_MS;
       this.tailTimer = setTimeout(step, SILENCE_CHUNK_MS / TAIL_SPEEDUP);

@@ -81,6 +81,8 @@ class PCMPlayer {
     catchUpAfter = 0.8,   // segundos de cola a partir de los cuales se acelera
     maxRate = 1.3,        // tope de velocidad: más se nota demasiado
     maxBacklog = 3.5,     // si la cola se dispara, se salta al directo
+    onBlocked = null,     // el navegador tiene el audio bloqueado
+    onUnblocked = null,   // ya vuelve a sonar
   } = {}) {
     this.ctx = ctx;
     this.leadTime = leadTime;
@@ -88,6 +90,9 @@ class PCMPlayer {
     this.catchUpAfter = catchUpAfter;
     this.maxRate = maxRate;
     this.maxBacklog = maxBacklog;
+    this.onBlocked = onBlocked;
+    this.onUnblocked = onUnblocked;
+    this.bloqueado = false;
     this.nextTime = 0;
     this.started = false;
     // Trozos ya programados. Hay que guardarlos para poder CALLARLOS si se
@@ -126,9 +131,33 @@ class PCMPlayer {
   // octava más grave. El navegador remuestrea solo si el buffer declara bien
   // su frecuencia.
   feedSamples(channel, sampleRate = PCM_SAMPLE_RATE) {
-    if (this.ctx.state === 'suspended') this.ctx.resume();
     const samples = channel.length;
     if (!samples) return;
+
+    // Si el navegador tiene el audio suspendido (pestaña en segundo plano,
+    // móvil bloqueado, política de reproducción automática), su reloj está
+    // CONGELADO. Encolar contra un reloj parado no suena nada ahora y suelta
+    // todo de golpe cuando se reanude. Mejor tirar el audio, avisar, e
+    // intentar reanudar: lo que se pierde es sonido que nadie estaba oyendo.
+    if (this.ctx.state !== 'running') {
+      // Solo al pasar a bloqueado, y reintentando como mucho una vez por
+      // segundo: llegan ~50 trozos por segundo y no tiene sentido avisar ni
+      // pedir permiso 50 veces.
+      const ahora = Date.now();
+      if (!this.bloqueado) {
+        this.bloqueado = true;
+        this.onBlocked?.();
+      }
+      if (ahora - (this.ultimoIntento || 0) > 1000) {
+        this.ultimoIntento = ahora;
+        this.ctx.resume?.().catch(() => {});
+      }
+      return;
+    }
+    if (this.bloqueado) {
+      this.bloqueado = false;
+      this.onUnblocked?.();
+    }
 
     const buf = this.ctx.createBuffer(1, samples, sampleRate);
     buf.getChannelData(0).set(channel);
@@ -205,8 +234,8 @@ async function opusSupported() {
 class OpusPlayer {
   // onFailure: si el descompresor peta a mitad, avisamos para volver a PCM y
   // que la persona no se quede sin oír nada.
-  constructor(ctx, { onFailure = null } = {}) {
-    this.pcm = new PCMPlayer(ctx);
+  constructor(ctx, { onFailure = null, onBlocked = null, onUnblocked = null } = {}) {
+    this.pcm = new PCMPlayer(ctx, { onBlocked, onUnblocked });
     this.timestamp = 0;
     this.broken = false;
     this.onFailure = onFailure;
