@@ -23,10 +23,14 @@ function vozDisponible() {
 const FIN_DE_FRASE = /[.!?…]+(\s|$)/;
 const PAUSA_MENOR = /[,;:]+(\s|$)/;
 const PALABRAS_PARA_CORTAR = 14;  // sin puntuación, se corta al llegar aquí
-const PALABRAS_PARA_COMA = 9;     // por debajo de esto, una coma no justifica cortar
+const PALABRAS_PARA_COMA = 14;    // por debajo de esto, una coma no justifica cortar
+// El ARRANQUE va aparte: en cuanto hay unas pocas palabras se empieza a leer,
+// para que la voz salga a la vez que el texto. Los umbrales altos de arriba se
+// aplican al resto de la frase, que es donde importa que suene fluido.
+const PALABRAS_PARA_EMPEZAR = 3;
 
 class LectorDeVoz {
-  constructor({ lang = 'es', rate = 1.12 } = {}) {
+  constructor({ lang = 'es', rate = 1.32 } = {}) {
     this.lang = lang;
     this.rate = rate;
     this.dicho = new Map();   // quién -> cuánto texto suyo se ha leído ya
@@ -42,21 +46,23 @@ class LectorDeVoz {
     if (!nuevo) return;
 
     const palabras = nuevo.trim() ? nuevo.trim().split(/\s+/).length : 0;
+    const arrancando = yaDicho === 0; // aún no se ha leído nada de esta frase
 
     // Final de frase: siempre se lee, ahí la pausa es natural.
     const hasta = this.buscarCorte(nuevo, FIN_DE_FRASE);
     if (hasta > 0) return this.soltar(from, yaDicho, nuevo, hasta);
 
-    // Coma o punto y coma, pero solo si el trozo ya es lo bastante largo como
-    // para que cortarlo no suene entrecortado.
-    if (palabras >= PALABRAS_PARA_COMA) {
+    // Coma o punto y coma. Al arrancar basta con unas pocas palabras, para que
+    // la voz salga a la vez que el texto; después se exige más para no
+    // trocear la frase y que suene entrecortada.
+    const minimo = arrancando ? PALABRAS_PARA_EMPEZAR : PALABRAS_PARA_COMA;
+    if (palabras >= minimo) {
       const coma = this.buscarCorte(nuevo, PAUSA_MENOR);
       if (coma > 0) return this.soltar(from, yaDicho, nuevo, coma);
     }
 
-    // Sin puntuación a la vista y ya es largo: se corta en un espacio para no
-    // hacer esperar a quien escucha.
-    if (palabras >= PALABRAS_PARA_CORTAR) {
+    // Sin puntuación a la vista: se corta en un espacio para no hacer esperar.
+    if (palabras >= (arrancando ? PALABRAS_PARA_EMPEZAR + 2 : PALABRAS_PARA_CORTAR)) {
       const espacio = nuevo.lastIndexOf(' ');
       if (espacio > 0) this.soltar(from, yaDicho, nuevo, espacio);
     }
