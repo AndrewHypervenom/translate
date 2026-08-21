@@ -40,7 +40,13 @@ const money = (n) => '$' + Number(n).toFixed(2);
 // Qué costó cada sala. Es lo que permite saber cuánto salió cada prueba, en
 // vez de ver solo un total del día sin poder atribuirlo.
 function renderRoomCosts(c) {
-  if (!c.rooms?.length) return '';
+  if (!c.rooms?.length) {
+    return '<div class="label" style="margin:4px 0 10px">Por sala</div>'
+      + '<div class="muted warnbox" style="margin-bottom:22px">Sin salas registradas todavía. '
+      + 'Ojo: este historial se guarda en el disco del servidor, y <b>Render lo borra en cada despliegue</b>. '
+      + 'Si necesitas que sobreviva, añade un disco persistente en Render y apunta ahí '
+      + '<code>STATE_FILE</code>.</div>';
+  }
 
   const cuando = (ms) => new Date(ms).toLocaleString([], {
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
@@ -72,11 +78,37 @@ function renderRoomCosts(c) {
       <b>Duró</b> es el tiempo que estuvo abierta; <b>Traducido</b>, los minutos que de verdad se pagaron.</div>`;
 }
 
-async function loadCosts() {
+// El disco de Render se borra en cada despliegue, así que el corte que pusiste
+// se perdería y volverían a aparecer los días viejos. Se guarda también aquí y
+// se le devuelve al servidor cuando detectamos que lo ha olvidado.
+const CORTE_STORE = 'positivos-admin-corte';
+
+function guardarCorte(since, discounted) {
+  try { localStorage.setItem(CORTE_STORE, JSON.stringify({ since, discounted })); } catch { /* incógnito */ }
+}
+
+function corteGuardado() {
+  try { return JSON.parse(localStorage.getItem(CORTE_STORE)); } catch { return null; }
+}
+
+async function restaurarCorteSiHaceFalta(c) {
+  const guardado = corteGuardado();
+  if (!guardado?.since) return false;
+  if (c.since === guardado.since) return false; // el servidor ya lo tiene
+  await api('/costs/reset', { method: 'POST', body: JSON.stringify(guardado) });
+  return true;
+}
+
+async function loadCosts(yaRestaurado = false) {
   el('refreshCosts').textContent = 'Consultando…';
   let c;
   try {
     c = await api('/costs');
+    // Tras un despliegue el servidor arranca sin corte: se le devuelve el
+    // que tenga este navegador y se vuelve a pedir.
+    if (!yaRestaurado && await restaurarCorteSiHaceFalta(c)) {
+      return loadCosts(true);
+    }
   } catch (e) {
     show('err', esc(e.message));
     el('refreshCosts').textContent = 'Consultar factura';
@@ -127,9 +159,14 @@ async function loadCosts() {
       <tbody>${c.days.slice().reverse().map((d) => {
         const tasa = d.real && d.minutes > 0.5 ? '$' + (d.real / d.minutes).toFixed(4) : '—';
         const lineas = Object.entries(d.lines).map(([k, v]) => `${esc(k)}: ${money(v)}`).join(' · ');
+        // Hay factura pero ningún minuto medido: el servidor se reinició y se
+        // perdió el contador. Decir "0 min" haría pensar que no se usó.
+        const perdido = d.real > 0 && d.minutes === 0;
         return `<tr>
           <td>${esc(d.day)}</td>
-          <td>${d.minutes} min</td>
+          <td>${perdido
+            ? '<span class="who">sin registrar<br>(el servidor se reinició)</span>'
+            : `${d.minutes} min`}</td>
           <td>${d.real === null ? '<span class="who">sin datos aún</span>' : money(d.real)}
             ${lineas ? `<span class="who">${lineas}</span>` : ''}</td>
           <td>${tasa}</td>
@@ -338,11 +375,12 @@ el('refreshCosts').onclick = loadCosts;
 el('clearCosts').onclick = async () => {
   if (!confirm('¿Poner el contador a cero desde ahora?\n\nLo ya facturado por OpenAI no se puede borrar (ese dinero se gastó), pero se descuenta para que el panel muestre solo lo que venga a partir de este momento.')) return;
   try {
-    const r = await api('/costs/reset', { method: 'POST' });
+    const r = await api('/costs/reset', { method: 'POST', body: '{}' });
+    guardarCorte(r.since, r.discounted); // para poder recuperarlo tras un despliegue
     show('ok', r.discounted > 0
       ? `Contador a cero. Se descuentan ${money(r.discounted)} ya facturados hoy.`
       : 'Contador a cero.');
-    await loadCosts();
+    await loadCosts(true);
     refresh();
   } catch (e) { show('err', esc(e.message)); }
 };

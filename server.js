@@ -1442,21 +1442,27 @@ app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
 // Borra el histórico de minutos medidos. Útil cuando arrastra datos que ya no
 // significan nada (los de las pruebas, por ejemplo), que además falsean el
 // cálculo del precio real por minuto.
-app.post('/admin/api/costs/reset', requireAdmin, async (_req, res) => {
+// Acepta un corte ya conocido para poder RESTAURARLO. Hace falta porque en
+// Render el disco se borra en cada despliegue: el panel lo guarda en el
+// navegador y se lo devuelve al servidor cuando ve que se ha perdido.
+app.post('/admin/api/costs/reset', requireAdmin, async (req, res) => {
+  const restaurar = req.body?.since && /^d{4}-d{2}-d{2}$/.test(req.body.since)
+    ? { since: req.body.since, amount: Number(req.body.discounted) || 0 }
+    : null;
   billing.history = {};
   billing.roomLog = [];
   billing.usedMs = 0;
   for (const room of rooms.values()) { room.usedMs = 0; room.peakPeers = room.peers.size; }
 
-  const hoy = new Date().toISOString().slice(0, 10);
+  const hoy = restaurar ? restaurar.since : new Date().toISOString().slice(0, 10);
   billing.since = hoy;
   billing.sinceDay = hoy;
-  billing.sinceAmount = 0;
+  billing.sinceAmount = restaurar ? restaurar.amount : 0;
 
   // La factura de OpenAI no se puede borrar: ese dinero se gastó. Lo que se
   // hace es apuntar cuánto llevaba facturado hoy y descontarlo a partir de
   // ahora, para que el panel muestre solo lo que venga de aquí en adelante.
-  if (OPENAI_ADMIN_KEY) {
+  if (OPENAI_ADMIN_KEY && !restaurar) {
     try {
       costsCache = { at: 0, data: null };
       const reales = await fetchOpenAICosts();
