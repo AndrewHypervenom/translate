@@ -879,6 +879,9 @@ class RoomPeer {
     this.hasMic = false;
     this.micAudioAt = 0;
     this.wantsOpus = false;             // lo dice el cliente al entrar
+    // Quien lee la traducción con la voz del navegador no necesita que le
+    // mandemos audio: es ancho de banda tirado.
+    this.wantsAudio = true;
     this.audioDropped = 0;              // trozos tirados por conexión lenta
     this.opusStreams = new Map();       // targetLang -> OpusStream
   }
@@ -886,7 +889,7 @@ class RoomPeer {
   // Reparte un trozo de audio traducido: comprimido a quien sepa, PCM al resto.
   // La compresión se hace UNA vez por idioma, no una por oyente.
   sendAudioToListeners(lang, base64Pcm) {
-    const listeners = this.room.listenersOf(lang, this);
+    const listeners = this.room.listenersOf(lang, this).filter((p) => p.wantsAudio);
     if (!listeners.length) return;
 
     const conOpus = listeners.filter((p) => p.wantsOpus);
@@ -1081,6 +1084,7 @@ roomWss.on('connection', (ws, req) => {
     });
     // El cliente dice qué sabe descomprimir. Sin WebCodecs se le manda PCM.
     peer.wantsOpus = Array.isArray(msg.codecs) && msg.codecs.includes('opus');
+    peer.wantsAudio = msg.wantsAudio !== false;
     room.peers.set(peer.id, peer);
     console.log(`[${roomId}] + ${peer.name} (habla ${peer.speakLang}, escucha ${peer.listenLang}) — ${room.peers.size} en sala`);
 
@@ -1150,6 +1154,7 @@ roomWss.on('connection', (ws, req) => {
       // Red de seguridad: si al cliente le falla el descompresor en marcha,
       // pide volver a PCM en vez de quedarse sin oír nada.
       case 'set_codec':
+        peer.wantsAudio = msg.codec !== 'none';
         peer.wantsOpus = msg.codec === 'opus';
         console.log(`[${peer.room.id}] ${peer.name} → audio en ${peer.wantsOpus ? 'opus' : 'pcm'}`);
         break;
