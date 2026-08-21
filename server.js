@@ -853,6 +853,7 @@ class RoomPeer {
     this.hasMic = false;
     this.micAudioAt = 0;
     this.wantsOpus = false;             // lo dice el cliente al entrar
+    this.audioDropped = 0;              // trozos tirados por conexión lenta
     this.opusStreams = new Map();       // targetLang -> OpusStream
   }
 
@@ -867,13 +868,13 @@ class RoomPeer {
 
     if (sinOpus.length) {
       const payload = JSON.stringify({ type: 'audio', codec: 'pcm', chunk: base64Pcm, from: this.id });
-      for (const peer of sinOpus) peer.sendRaw(payload);
+      for (const peer of sinOpus) peer.sendAudioRaw(payload);
     }
 
     if (conOpus.length) {
       for (const packet of this.opusStreamFor(lang).push(base64Pcm)) {
         const payload = JSON.stringify({ type: 'audio', codec: 'opus', chunk: packet, from: this.id });
-        for (const peer of conOpus) peer.sendRaw(payload);
+        for (const peer of conOpus) peer.sendAudioRaw(payload);
       }
     }
   }
@@ -894,7 +895,7 @@ class RoomPeer {
     const conOpus = this.room.listenersOf(lang, this).filter((p) => p.wantsOpus);
     for (const packet of stream.flush()) {
       const payload = JSON.stringify({ type: 'audio', codec: 'opus', chunk: packet, from: this.id });
-      for (const peer of conOpus) peer.sendRaw(payload);
+      for (const peer of conOpus) peer.sendAudioRaw(payload);
     }
   }
 
@@ -909,6 +910,30 @@ class RoomPeer {
 
   sendRaw(payload) {
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(payload);
+  }
+
+  // El audio es perecedero: si a alguien se le atasca la conexión, seguir
+  // metiéndole trozos en la cola solo consigue que dentro de un minuto lo oiga
+  // TODO de golpe y atropellado. Mejor tirar lo que ya no le va a llegar a
+  // tiempo y que siga oyendo el presente.
+  //
+  // Los mensajes de control (subtítulos, avisos, lista de gente) NO pasan por
+  // aquí: son pequeños y tienen que llegar siempre. Por eso el texto se veía
+  // bien mientras la voz se acumulaba.
+  sendAudioRaw(payload) {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.ws.bufferedAmount > this.audioBufferLimit()) {
+      this.audioDropped++;
+      return;
+    }
+    this.ws.send(payload);
+  }
+
+  // Cuántos bytes de audio pendientes se toleran antes de empezar a tirar.
+  // Comprimido son ~5 KB/s y sin comprimir ~64 KB/s, así que el límite en
+  // bytes tiene que depender del códec para que en ambos casos sean ~2 s.
+  audioBufferLimit() {
+    return this.wantsOpus ? 12 * 1024 : 128 * 1024;
   }
 
   // El primer traductor es el que devuelve al hablante su propia transcripción

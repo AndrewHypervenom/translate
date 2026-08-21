@@ -90,6 +90,18 @@ class PCMPlayer {
     this.maxBacklog = maxBacklog;
     this.nextTime = 0;
     this.started = false;
+    // Trozos ya programados. Hay que guardarlos para poder CALLARLOS si se
+    // salta al directo: si no, el audio nuevo suena encima del viejo y con una
+    // cola grande se oyen decenas de voces solapadas a la vez.
+    this.programados = new Set();
+  }
+
+  // Corta de raíz todo lo que estuviera programado y aún no se ha oído.
+  descartarCola() {
+    for (const src of this.programados) {
+      try { src.stop(); } catch { /* ya terminó */ }
+    }
+    this.programados.clear();
   }
 
   // PCM16 en base64: lo que manda el servidor cuando no hay compresión.
@@ -141,7 +153,9 @@ class PCMPlayer {
     if (cola > this.maxBacklog) {
       // Descolgados del todo (un parón de red, por ejemplo): se salta a lo que
       // se está diciendo ahora. Se pierde algo, pero es peor oír algo de hace
-      // medio minuto.
+      // medio minuto. Hay que CALLAR lo ya programado antes de reprogramar, o
+      // lo nuevo suena encima de lo viejo.
+      this.descartarCola();
       this.nextTime = now + this.leadTime;
     } else if (cola > this.catchUpAfter) {
       // Acelerón suave, proporcional al retraso: recupera sin perder palabras.
@@ -149,6 +163,8 @@ class PCMPlayer {
     }
     if (src.playbackRate) src.playbackRate.value = rate;
 
+    this.programados.add(src);
+    src.onended = () => this.programados.delete(src);
     src.start(this.nextTime);
     this.nextTime += samples / sampleRate / rate; // dura menos si se acelera
   }
