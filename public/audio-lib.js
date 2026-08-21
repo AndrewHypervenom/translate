@@ -69,10 +69,25 @@ function rms(f32) {
 // por reproductor.
 
 class PCMPlayer {
-  constructor(ctx, { leadTime = 0.03, destination = null } = {}) {
+  constructor(ctx, {
+    leadTime = 0.03,
+    destination = null,
+    // El modelo entrega la voz traducida MÁS RÁPIDO de lo que se puede
+    // escuchar. Si cada trozo se encola detrás del anterior sin más, la cola
+    // crece intervención tras intervención y la voz se va quedando cada vez
+    // más atrás (medido: +1 s por intervención, sin tope). Por eso, cuando hay
+    // retraso acumulado se reproduce un poco más deprisa para recuperarlo sin
+    // perder ni una palabra.
+    catchUpAfter = 0.8,   // segundos de cola a partir de los cuales se acelera
+    maxRate = 1.3,        // tope de velocidad: más se nota demasiado
+    maxBacklog = 3.5,     // si la cola se dispara, se salta al directo
+  } = {}) {
     this.ctx = ctx;
     this.leadTime = leadTime;
     this.destination = destination;
+    this.catchUpAfter = catchUpAfter;
+    this.maxRate = maxRate;
+    this.maxBacklog = maxBacklog;
     this.nextTime = 0;
     this.started = false;
   }
@@ -118,8 +133,24 @@ class PCMPlayer {
     } else if (this.nextTime < now) {
       this.nextTime = now + 0.01;
     }
+
+    // Cuánta voz hay esperando turno: es exactamente lo que el oyente va por
+    // detrás de lo que ya se dijo.
+    const cola = this.nextTime - now;
+    let rate = 1;
+    if (cola > this.maxBacklog) {
+      // Descolgados del todo (un parón de red, por ejemplo): se salta a lo que
+      // se está diciendo ahora. Se pierde algo, pero es peor oír algo de hace
+      // medio minuto.
+      this.nextTime = now + this.leadTime;
+    } else if (cola > this.catchUpAfter) {
+      // Acelerón suave, proporcional al retraso: recupera sin perder palabras.
+      rate = Math.min(this.maxRate, 1 + (cola - this.catchUpAfter) * 0.15);
+    }
+    if (src.playbackRate) src.playbackRate.value = rate;
+
     src.start(this.nextTime);
-    this.nextTime += samples / sampleRate; // duración real, no la supuesta
+    this.nextTime += samples / sampleRate / rate; // dura menos si se acelera
   }
 
   // Milisegundos de audio aún encolado.
