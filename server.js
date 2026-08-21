@@ -149,7 +149,10 @@ const billing = {
 // ════════════════════════════════════════════════════════════════════════════
 
 const SESSION_MAX_MS = 8 * 60 * 1000; // vida máxima antes de reciclar por contexto
-const SESSION_IDLE_MS = 30 * 1000;    // sin audio → dormir la sesión (y no pagarla)
+// Sin audio se duerme la sesión. Generoso a propósito: sólo se paga por audio
+// procesado, así que una sesión abierta y callada no cuesta nada, mientras que
+// despertarla en mitad de una conversación mete 1-2 s de espera al hablar.
+const SESSION_IDLE_MS = Number(process.env.SESSION_IDLE_MS || 5 * 60 * 1000);
 const SILENCE_SETTLE_MS = 1200;       // silencio mínimo para reciclar sin cortar a nadie
 const MAX_QUEUED_CHUNKS = 120;        // ~10 s de audio retenido mientras (re)conecta
 const MAX_RECONNECT_ATTEMPTS = 5;   // reintentos rápidos antes de bajar el ritmo
@@ -1078,6 +1081,11 @@ roomWss.on('connection', (ws, req) => {
         }
         peer.hasMic = true;
         peer.micAudioAt = Date.now();
+        // Se abren las sesiones YA, no al empezar a hablar: montar la conexión
+        // con OpenAI lleva 1-2 s, y hacerlo mientras la persona ya está
+        // hablando obliga a encolar el principio de la frase. Al pedir turno
+        // hay un hueco natural para prepararlo todo.
+        peer.syncTranslators();
         peer.send({ type: 'mic_granted' });
         peer.room.broadcast(peer.room.rosterMessage());
         console.log(`[${peer.room.id}] 🎙️ ${peer.name} toma la palabra`);

@@ -237,7 +237,10 @@ class VoiceGate {
   constructor({
     frameMs = 43,
     prerollMs = 300,
-    holdMs = 600,
+    // Cola tras la última voz. Cada milisegundo aquí es un milisegundo que el
+    // oyente espera de más, así que se recorta a lo justo para no comerse la
+    // sílaba final.
+    holdMs = 400,
     absFloor = 0.006,
     openFactor = 3.0,
     closeFactor = 2.0,
