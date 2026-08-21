@@ -116,46 +116,18 @@ function audioMsFromBase64(base64) {
   return bytes / 2 / (SAMPLE_RATE / 1000);
 }
 
-// Clave de administración de OpenAI (sk-admin-…), DISTINTA de la normal. Sin
-// ella solo se puede estimar con la tabla de precios; con ella se consulta lo
-// que de verdad te facturaron y se calcula tu precio real por minuto.
-const OPENAI_ADMIN_KEY = process.env.OPENAI_ADMIN_KEY || '';
-// Precio de referencia mientras no haya datos reales: $0.034/min de
-// gpt-realtime-translate + $0.017/min de gpt-realtime-whisper.
-const PRICE_PER_MINUTE = Number(process.env.PRICE_PER_MINUTE || 0.051);
-
 const billing = {
   day: new Date().toISOString().slice(0, 10),
   usedMs: 0,
-  history: {}, // 'YYYY-MM-DD' -> ms medidos, para comparar con la factura real
-  // Marcador de "empieza a contar desde aquí". La factura de OpenAI no se
-  // puede borrar —ese dinero se gastó—, pero sí se puede descontar lo anterior
-  // para que el panel refleje solo el uso a partir de cierto momento.
-  roomLog: [],        // salas ya terminadas, para saber qué costó cada prueba
-  since: null,        // días anteriores no se muestran
-  sinceAmount: 0,     // ya facturado el día del corte, se resta
-  sinceDay: null,
 
   rollOver() {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== this.day) {
       console.log(`[Gasto] Nuevo día (${today}): contador a cero`);
-      this.history[this.day] = this.usedMs;
-      // Solo interesan los últimos días para calibrar el precio.
-      for (const d of Object.keys(this.history).sort().slice(0, -14)) delete this.history[d];
       this.day = today;
       this.usedMs = 0;
       for (const room of rooms.values()) room.usedMs = 0;
     }
-  },
-
-  // Minutos medidos por día, incluido el de hoy en curso.
-  minutesByDay() {
-    this.rollOver();
-    const out = {};
-    for (const [d, ms] of Object.entries(this.history)) out[d] = ms / 60000;
-    out[this.day] = this.usedMs / 60000;
-    return out;
   },
 
   limitMs() { return DAILY_LIMIT_MINUTES * 60 * 1000; },
@@ -755,8 +727,6 @@ class Room {
     this.maxPeers = maxPeers;
     this.maxSpeakers = maxSpeakers;
     this.usedMs = 0;
-    this.peakPeers = 0;   // máximo de gente a la vez
-    this.everJoined = 0;  // cuántas personas pasaron en total
   }
 
   speakers() {
@@ -773,14 +743,6 @@ class Room {
       peer.ws.close();
     }
     this.peers.clear();
-    // Ficha de la sala para el historial de costes: sin esto, al cerrarse se
-    // perdía lo que había costado cada prueba.
-    billing.roomLog.push({
-      code: this.id, label: this.label, langs: this.langs,
-      openedAt: this.createdAt, closedAt: Date.now(),
-      usedMs: this.usedMs, peakPeers: this.peakPeers, joined: this.everJoined,
-    });
-    if (billing.roomLog.length > 100) billing.roomLog = billing.roomLog.slice(-100);
     rooms.delete(this.id);
     saveState();
     console.log(`[${this.id}] Sala cerrada: ${reason}`);
@@ -797,8 +759,6 @@ class Room {
       langs: this.langs,
       speaking: this.speakers().map((p) => p.name),
       minutesUsed: +(this.usedMs / 60000).toFixed(2),
-      peakPeers: this.peakPeers,
-      joined: this.everJoined,
       minutesLeft: Math.max(0, Math.round((this.expiresAt - Date.now()) / 60000)),
       expired: this.expired,
     };
@@ -1068,8 +1028,6 @@ roomWss.on('connection', (ws, req) => {
     // El cliente dice qué sabe descomprimir. Sin WebCodecs se le manda PCM.
     peer.wantsOpus = Array.isArray(msg.codecs) && msg.codecs.includes('opus');
     room.peers.set(peer.id, peer);
-    room.everJoined++;
-    room.peakPeers = Math.max(room.peakPeers, room.peers.size);
     console.log(`[${roomId}] + ${peer.name} (habla ${peer.speakLang}, escucha ${peer.listenLang}) — ${room.peers.size} en sala`);
 
     send({
@@ -1281,203 +1239,6 @@ app.post('/admin/api/rooms', requireAdmin, (req, res) => {
   res.json({ ...room.summary(), url: `${req.protocol}://${req.get('host')}/sala/${code}` });
 });
 
-// ── Coste REAL ────────────────────────────────────────────────────────────────
-// La tabla de precios es una cosa y la factura otra. Aquí se pregunta a OpenAI
-// cuánto cobró de verdad cada día y se cruza con los minutos que medimos
-// nosotros: de ahí sale TU precio real por minuto, que es el que sirve para
-// estimar lo que llevas gastado hoy (la factura va por días y llega tarde).
-//
-// Ojo: la factura es de TODA la organización. Si usas OpenAI para otras cosas,
-// se desglosa por línea para poder distinguirlas.
-const COSTS_CACHE_MS = Number(process.env.COSTS_CACHE_MS || 10 * 60 * 1000);
-let costsCache = { at: 0, data: null };
-
-async function fetchOpenAICosts(dias = 8) {
-  if (costsCache.data && Date.now() - costsCache.at < COSTS_CACHE_MS) return costsCache.data;
-
-  const desde = new Date();
-  desde.setUTCHours(0, 0, 0, 0);
-  desde.setUTCDate(desde.getUTCDate() - (dias - 1));
-
-  // La base es configurable para poder probarlo sin gastar dinero de verdad.
-  const base = process.env.OPENAI_COSTS_BASE || 'https://api.openai.com';
-  const url = `${base}/v1/organization/costs?start_time=${Math.floor(desde.getTime() / 1000)}`
-    + `&bucket_width=1d&limit=${dias}&group_by=line_item`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${OPENAI_ADMIN_KEY}` } });
-  if (!res.ok) throw new Error(`OpenAI respondió ${res.status}: ${(await res.text()).slice(0, 200)}`);
-
-  const json = await res.json();
-  const porDia = {};
-  for (const bucket of json.data || []) {
-    const dia = new Date(bucket.start_time * 1000).toISOString().slice(0, 10);
-    const entrada = porDia[dia] || (porDia[dia] = { total: 0, lineas: {} });
-    for (const r of bucket.results || []) {
-      const valor = Number(r.amount?.value) || 0;
-      entrada.total += valor;
-      const linea = r.line_item || 'otros';
-      entrada.lineas[linea] = (entrada.lineas[linea] || 0) + valor;
-    }
-  }
-  costsCache = { at: Date.now(), data: porDia };
-  return porDia;
-}
-
-// Desglose por sala: cuánta gente, cuánto duró y cuánto costó cada prueba.
-// Sin esto solo se veía el total del día y no había forma de saber qué salió
-// caro y qué no.
-function roomBreakdown(precioMinuto) {
-  const fichas = [
-    ...billing.roomLog.map((r) => ({ ...r, open: false })),
-    ...[...rooms.values()].map((r) => ({
-      code: r.id, label: r.label, langs: r.langs,
-      openedAt: r.createdAt, closedAt: null,
-      usedMs: r.usedMs, peakPeers: r.peakPeers, joined: r.everJoined,
-      open: true,
-    })),
-  ];
-
-  const salas = fichas
-    .filter((r) => !billing.since || new Date(r.openedAt).toISOString().slice(0, 10) >= billing.since)
-    .map((r) => {
-      const minutos = r.usedMs / 60000;
-      return {
-        code: r.code,
-        label: r.label,
-        langs: r.langs,
-        open: r.open,
-        openedAt: r.openedAt,
-        // Duración real de la sala, distinta de los minutos traducidos.
-        durationMin: Math.round(((r.closedAt || Date.now()) - r.openedAt) / 60000),
-        peakPeers: r.peakPeers,
-        joined: r.joined,
-        minutes: +minutos.toFixed(2),
-        cost: +(minutos * precioMinuto).toFixed(3),
-      };
-    })
-    .sort((a, b) => b.openedAt - a.openedAt)
-    .slice(0, 40);
-
-  return {
-    rooms: salas,
-    roomsTotal: {
-      count: salas.length,
-      minutes: +salas.reduce((n, r) => n + r.minutes, 0).toFixed(2),
-      cost: +salas.reduce((n, r) => n + r.cost, 0).toFixed(2),
-    },
-  };
-}
-
-app.get('/admin/api/costs', requireAdmin, async (_req, res) => {
-  const medidos = billing.minutesByDay();
-  const hoy = billing.day;
-
-  if (!OPENAI_ADMIN_KEY) {
-    return res.json({
-      available: false,
-      reason: 'Falta OPENAI_ADMIN_KEY (una clave de administración de OpenAI, sk-admin-…, distinta de la normal).',
-      pricePerMinute: PRICE_PER_MINUTE,
-      todayMinutes: +medidos[hoy].toFixed(2),
-      todayEstimate: +(medidos[hoy] * PRICE_PER_MINUTE).toFixed(3),
-      since: billing.since,
-      discounted: +billing.sinceAmount.toFixed(2),
-      ...roomBreakdown(PRICE_PER_MINUTE),
-    });
-  }
-
-  let reales;
-  try {
-    reales = await fetchOpenAICosts();
-  } catch (err) {
-    return res.json({
-      available: false,
-      reason: `No se pudo consultar la factura: ${err.message}`,
-      pricePerMinute: PRICE_PER_MINUTE,
-      todayMinutes: +medidos[hoy].toFixed(2),
-      todayEstimate: +(medidos[hoy] * PRICE_PER_MINUTE).toFixed(3),
-      since: billing.since,
-      discounted: +billing.sinceAmount.toFixed(2),
-      ...roomBreakdown(PRICE_PER_MINUTE),
-    });
-  }
-
-  // Solo los días con algo que contar: una lista de ceros no informa de nada.
-  // Y nada anterior al corte, si se puso el contador a cero.
-  const dias = [...new Set([...Object.keys(medidos), ...Object.keys(reales)])]
-    .filter((d) => !billing.since || d >= billing.since)
-    .sort().slice(-8);
-
-  const filas = dias.map((day) => {
-    let real = reales[day] ? reales[day].total : null;
-    // El día del corte ya llevaba gasto: se descuenta lo de antes.
-    if (real !== null && day === billing.sinceDay) real = Math.max(0, real - billing.sinceAmount);
-    return {
-      day,
-      minutes: +(medidos[day] || 0).toFixed(2),
-      real: real === null ? null : +real.toFixed(4),
-      lines: reales[day]?.lineas || {},
-    };
-  }).filter((f) => f.minutes > 0 || f.real > 0);
-
-  // El precio real se saca de los días ya CERRADOS con consumo: el de hoy aún
-  // no está facturado del todo y falsearía la media.
-  const calibra = filas.filter((f) => f.day !== hoy && f.real > 0 && f.minutes > 0.5);
-  const minutosCal = calibra.reduce((n, f) => n + f.minutes, 0);
-  const costeCal = calibra.reduce((n, f) => n + f.real, 0);
-  const precioReal = minutosCal > 0 ? costeCal / minutosCal : null;
-
-  res.json({
-    available: true,
-    days: filas,
-    pricePerMinute: PRICE_PER_MINUTE,
-    realPricePerMinute: precioReal ? +precioReal.toFixed(4) : null,
-    calibratedOn: { days: calibra.length, minutes: +minutosCal.toFixed(1), cost: +costeCal.toFixed(2) },
-    todayMinutes: +medidos[hoy].toFixed(2),
-    todayEstimate: +(medidos[hoy] * (precioReal || PRICE_PER_MINUTE)).toFixed(3),
-    since: billing.since,
-    discounted: +billing.sinceAmount.toFixed(2),
-    ...roomBreakdown(precioReal || PRICE_PER_MINUTE),
-  });
-});
-
-// Borra el histórico de minutos medidos. Útil cuando arrastra datos que ya no
-// significan nada (los de las pruebas, por ejemplo), que además falsean el
-// cálculo del precio real por minuto.
-// Acepta un corte ya conocido para poder RESTAURARLO. Hace falta porque en
-// Render el disco se borra en cada despliegue: el panel lo guarda en el
-// navegador y se lo devuelve al servidor cuando ve que se ha perdido.
-app.post('/admin/api/costs/reset', requireAdmin, async (req, res) => {
-  const restaurar = req.body?.since && /^d{4}-d{2}-d{2}$/.test(req.body.since)
-    ? { since: req.body.since, amount: Number(req.body.discounted) || 0 }
-    : null;
-  billing.history = {};
-  billing.roomLog = [];
-  billing.usedMs = 0;
-  for (const room of rooms.values()) { room.usedMs = 0; room.peakPeers = room.peers.size; }
-
-  const hoy = restaurar ? restaurar.since : new Date().toISOString().slice(0, 10);
-  billing.since = hoy;
-  billing.sinceDay = hoy;
-  billing.sinceAmount = restaurar ? restaurar.amount : 0;
-
-  // La factura de OpenAI no se puede borrar: ese dinero se gastó. Lo que se
-  // hace es apuntar cuánto llevaba facturado hoy y descontarlo a partir de
-  // ahora, para que el panel muestre solo lo que venga de aquí en adelante.
-  if (OPENAI_ADMIN_KEY && !restaurar) {
-    try {
-      costsCache = { at: 0, data: null };
-      const reales = await fetchOpenAICosts();
-      billing.sinceAmount = reales[hoy]?.total || 0;
-    } catch (err) {
-      console.warn('[admin] No se pudo leer la factura para el corte:', err.message);
-    }
-  }
-
-  costsCache = { at: 0, data: null };
-  saveState();
-  console.log(`[admin] Contador a cero desde ${hoy} (descontando $${billing.sinceAmount.toFixed(2)} ya facturados)`);
-  res.json({ ok: true, since: hoy, discounted: +billing.sinceAmount.toFixed(4) });
-});
-
 app.post('/admin/api/rooms/:code/close', requireAdmin, (req, res) => {
   const room = rooms.get(normalizeRoomId(req.params.code));
   if (!room) return res.status(404).json({ error: 'Esa sala no existe.' });
@@ -1499,9 +1260,7 @@ let saveTimer = null;
 function stateSnapshot() {
   return JSON.stringify({
     billing: {
-      day: billing.day, usedMs: billing.usedMs, history: billing.history,
-      since: billing.since, sinceDay: billing.sinceDay, sinceAmount: billing.sinceAmount,
-      roomLog: billing.roomLog,
+      day: billing.day, usedMs: billing.usedMs,
     },
     rooms: [...rooms.values()].map((r) => ({
       id: r.id, label: r.label, createdAt: r.createdAt, expiresAt: r.expiresAt,
@@ -1540,18 +1299,8 @@ function loadState() {
     return; // primera vez o fichero ilegible: se empieza limpio
   }
 
-  if (data.billing?.history && typeof data.billing.history === 'object') {
-    billing.history = data.billing.history;
-  }
-  billing.roomLog = Array.isArray(data.billing?.roomLog) ? data.billing.roomLog : [];
-  billing.since = data.billing?.since || null;
-  billing.sinceDay = data.billing?.sinceDay || null;
-  billing.sinceAmount = Number(data.billing?.sinceAmount) || 0;
   if (data.billing?.day === new Date().toISOString().slice(0, 10)) {
     billing.usedMs = Number(data.billing.usedMs) || 0;
-  } else if (data.billing?.day) {
-    // El servidor estuvo parado y cambió el día: ese consumo va al histórico.
-    billing.history[data.billing.day] = Number(data.billing.usedMs) || 0;
   }
 
   let recuperadas = 0;

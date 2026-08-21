@@ -29,154 +29,6 @@ async function api(path, options = {}) {
   return data;
 }
 
-// ── Coste real ────────────────────────────────────────────────────────────────
-// La tabla de precios dice una cosa y la factura otra. Se cruzan los minutos
-// medidos aquí con lo que OpenAI cobró de verdad, y de ahí sale el precio real
-// por minuto — que es el que se usa para estimar lo que llevas gastado hoy,
-// porque la factura va por días y llega con retraso.
-
-const money = (n) => '$' + Number(n).toFixed(2);
-
-// Qué costó cada sala. Es lo que permite saber cuánto salió cada prueba, en
-// vez de ver solo un total del día sin poder atribuirlo.
-function renderRoomCosts(c) {
-  if (!c.rooms?.length) {
-    return '<div class="label" style="margin:4px 0 10px">Por sala</div>'
-      + '<div class="muted warnbox" style="margin-bottom:22px">Sin salas registradas todavía. '
-      + 'Ojo: este historial se guarda en el disco del servidor, y <b>Render lo borra en cada despliegue</b>. '
-      + 'Si necesitas que sobreviva, añade un disco persistente en Render y apunta ahí '
-      + '<code>STATE_FILE</code>.</div>';
-  }
-
-  const cuando = (ms) => new Date(ms).toLocaleString([], {
-    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-  });
-
-  return `
-    <div class="label" style="margin:4px 0 10px">Por sala</div>
-    <table>
-      <thead><tr><th>Sala</th><th>Cuándo</th><th>Personas</th><th>Duró</th><th>Traducido</th><th>Coste</th></tr></thead>
-      <tbody>
-        ${c.rooms.map((r) => `
-          <tr>
-            <td class="code">${esc(r.code)}${r.open ? ' ●' : ''}
-              <span class="who">${r.label ? esc(r.label) + ' · ' : ''}${(r.langs || []).join('/') || 'libre'}</span></td>
-            <td>${esc(cuando(r.openedAt))}</td>
-            <td>${r.peakPeers}<span class="who">${r.joined} en total</span></td>
-            <td>${r.durationMin} min</td>
-            <td>${r.minutes} min</td>
-            <td>${money(r.cost)}</td>
-          </tr>`).join('')}
-        <tr>
-          <td colspan="4"><b>Total · ${c.roomsTotal.count} salas</b></td>
-          <td><b>${c.roomsTotal.minutes} min</b></td>
-          <td><b>${money(c.roomsTotal.cost)}</b></td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="muted" style="margin:8px 0 22px">● sala todavía abierta. <b>Personas</b> es el máximo a la vez.
-      <b>Duró</b> es el tiempo que estuvo abierta; <b>Traducido</b>, los minutos que de verdad se pagaron.</div>`;
-}
-
-// El disco de Render se borra en cada despliegue, así que el corte que pusiste
-// se perdería y volverían a aparecer los días viejos. Se guarda también aquí y
-// se le devuelve al servidor cuando detectamos que lo ha olvidado.
-const CORTE_STORE = 'positivos-admin-corte';
-
-function guardarCorte(since, discounted) {
-  try { localStorage.setItem(CORTE_STORE, JSON.stringify({ since, discounted })); } catch { /* incógnito */ }
-}
-
-function corteGuardado() {
-  try { return JSON.parse(localStorage.getItem(CORTE_STORE)); } catch { return null; }
-}
-
-async function restaurarCorteSiHaceFalta(c) {
-  const guardado = corteGuardado();
-  if (!guardado?.since) return false;
-  if (c.since === guardado.since) return false; // el servidor ya lo tiene
-  await api('/costs/reset', { method: 'POST', body: JSON.stringify(guardado) });
-  return true;
-}
-
-async function loadCosts(yaRestaurado = false) {
-  el('refreshCosts').textContent = 'Consultando…';
-  let c;
-  try {
-    c = await api('/costs');
-    // Tras un despliegue el servidor arranca sin corte: se le devuelve el
-    // que tenga este navegador y se vuelve a pedir.
-    if (!yaRestaurado && await restaurarCorteSiHaceFalta(c)) {
-      return loadCosts(true);
-    }
-  } catch (e) {
-    show('err', esc(e.message));
-    el('refreshCosts').textContent = 'Consultar factura';
-    return;
-  }
-  el('refreshCosts').textContent = 'Consultar factura';
-
-  el('costToday').textContent = `${money(c.todayEstimate)} hoy · ${c.todayMinutes} min`;
-
-  if (!c.available) {
-    el('costHint').innerHTML = `Estimado con la tabla de precios (${money(c.pricePerMinute)}/min). `
-      + `Para ver lo que <b>realmente</b> te cobran: ${esc(c.reason)}`;
-    el('costTable').innerHTML = '';
-    return;
-  }
-
-  if (c.realPricePerMinute) {
-    const desvio = ((c.realPricePerMinute / c.pricePerMinute - 1) * 100);
-    el('costHint').innerHTML = `Calculado con tu precio <b>real</b>: `
-      + `<b>$${c.realPricePerMinute.toFixed(4)}/min</b>, sacado de ${c.calibratedOn.days} día(s) ya facturados `
-      + `(${c.calibratedOn.minutes} min → ${money(c.calibratedOn.cost)}). `
-      + `La tabla de precios decía $${c.pricePerMinute.toFixed(4)}: `
-      + `<b>${desvio >= 0 ? '+' : ''}${desvio.toFixed(0)}%</b> de diferencia.`;
-  } else {
-    el('costHint').innerHTML = `Estimado con la tabla (${money(c.pricePerMinute)}/min). `
-      + 'En cuanto haya un día completo facturado, aquí saldrá tu precio real.';
-  }
-
-  // Transparencia: si se puso el contador a cero, hay que decir qué se descontó.
-  // Ese dinero se gastó de verdad; solo se está dejando de mostrar.
-  const corte = c.since
-    ? `<div class="muted" style="margin-top:10px">Contando desde el ${esc(c.since)}`
-      + (c.discounted > 0 ? `, descontando ${money(c.discounted)} ya facturados antes del corte` : '')
-      + '. Ese gasto anterior sigue en tu cuenta de OpenAI; aquí solo no se muestra.</div>'
-    : '';
-
-  const porSala = renderRoomCosts(c);
-
-  if (!c.days.length) {
-    el('costTable').innerHTML = porSala
-      + '<div class="muted">Todavía no hay consumo registrado.</div>' + corte;
-    return;
-  }
-
-  el('costTable').innerHTML = porSala + `
-    <table>
-      <thead><tr><th>Día</th><th>Medido</th><th>Facturado</th><th>Real por minuto</th></tr></thead>
-      <tbody>${c.days.slice().reverse().map((d) => {
-        const tasa = d.real && d.minutes > 0.5 ? '$' + (d.real / d.minutes).toFixed(4) : '—';
-        const lineas = Object.entries(d.lines).map(([k, v]) => `${esc(k)}: ${money(v)}`).join(' · ');
-        // Hay factura pero ningún minuto medido: el servidor se reinició y se
-        // perdió el contador. Decir "0 min" haría pensar que no se usó.
-        const perdido = d.real > 0 && d.minutes === 0;
-        return `<tr>
-          <td>${esc(d.day)}</td>
-          <td>${perdido
-            ? '<span class="who">sin registrar<br>(el servidor se reinició)</span>'
-            : `${d.minutes} min`}</td>
-          <td>${d.real === null ? '<span class="who">sin datos aún</span>' : money(d.real)}
-            ${lineas ? `<span class="who">${lineas}</span>` : ''}</td>
-          <td>${tasa}</td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table>
-    <div class="muted" style="margin-top:10px">La factura es de toda tu cuenta de OpenAI. El desglose por línea
-      te deja ver qué parte es de la traducción y qué parte de otras cosas tuyas.</div>${corte}`;
-}
-
 // ── Idiomas permitidos ────────────────────────────────────────────────────────
 // Se eligen marcándolos, no escribiéndolos: un dedazo aquí sale caro. Cada
 // idioma extra es otra sesión de traducción por cada persona que hable, así
@@ -362,7 +214,6 @@ async function unlock(candidate) {
   el('panel').style.display = 'block';
   renderLangChips();
   refresh();
-  loadCosts();
   timer = setInterval(refresh, 5000); // el consumo se mueve mientras hablan
   return true;
 }
@@ -371,19 +222,6 @@ el('enter').onclick = () => unlock(el('key').value.trim());
 el('key').onkeydown = (e) => { if (e.key === 'Enter') unlock(el('key').value.trim()); };
 el('create').onclick = createRoom;
 el('refresh').onclick = refresh;
-el('refreshCosts').onclick = loadCosts;
-el('clearCosts').onclick = async () => {
-  if (!confirm('¿Poner el contador a cero desde ahora?\n\nLo ya facturado por OpenAI no se puede borrar (ese dinero se gastó), pero se descuenta para que el panel muestre solo lo que venga a partir de este momento.')) return;
-  try {
-    const r = await api('/costs/reset', { method: 'POST', body: '{}' });
-    guardarCorte(r.since, r.discounted); // para poder recuperarlo tras un despliegue
-    show('ok', r.discounted > 0
-      ? `Contador a cero. Se descuentan ${money(r.discounted)} ya facturados hoy.`
-      : 'Contador a cero.');
-    await loadCosts(true);
-    refresh();
-  } catch (e) { show('err', esc(e.message)); }
-};
 
 // Si ya entraste en este navegador, no vuelve a pedir la clave.
 const saved = (() => { try { return localStorage.getItem(KEY_STORE); } catch { return null; } })();
