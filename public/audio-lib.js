@@ -265,8 +265,23 @@ class OpusPlayer {
     this.onFailure?.();
   }
 
+  // WebCodecs guarda paquetes dentro del descompresor hasta tener suficientes.
+  // Con una frase corta caben todos ahí y NO suena nada: el texto sale (no pasa
+  // por aquí) y la voz aparece más tarde, cuando los paquetes de la siguiente
+  // frase empujan a los de la anterior. flush() los saca ya.
+  flush() {
+    if (this.broken) return;
+    clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    try { this.decoder.flush().catch(() => {}); } catch { /* nada pendiente */ }
+  }
+
   feed(base64) {
     if (this.broken) return;
+    // Si dejan de llegar paquetes, se vacía el descompresor: así una frase
+    // corta suena en cuanto termina, sin esperar a la siguiente.
+    clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => this.flush(), 200);
     try {
       const bin = atob(base64);
       const bytes = new Uint8Array(bin.length);
@@ -286,6 +301,7 @@ class OpusPlayer {
   pendingMs() { return this.pcm.pendingMs(); }
 
   close() {
+    clearTimeout(this.flushTimer);
     try { this.decoder.close(); } catch { /* ya cerrado */ }
   }
 }

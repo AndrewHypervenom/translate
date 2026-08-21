@@ -237,6 +237,9 @@ function handleMessage(msg) {
       break;
 
     case 'final':
+      // Fin de frase: se vacía el descompresor para que la voz suene YA y no
+      // se quede dentro esperando a la frase siguiente.
+      playerFor(msg.from, 'opus')?.flush?.();
       partials.delete(msg.from);
       lines.push({ name: msg.name, text: msg.text });
       if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
